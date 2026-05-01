@@ -125,100 +125,117 @@ class CustomCaptchaSolver:
         """
         Main entry point. Solves captcha and returns token.
         Enhanced with better retry logic and verification.
+        Completely silent error handling for clean output.
         """
-        # Suppress verbose error messages during navigation
+        # Suppress all verbose logging
         import logging
-        logging.getLogger('playwright').setLevel(logging.WARNING)
+        logging.getLogger('playwright').setLevel(logging.CRITICAL)
         
-        print(f"[*] 🧠 Starting REAL CV Solver for {service_url}")
+        if self.debug:
+            print(f"[*] 🧠 Starting REAL CV Solver for {service_url}")
         
-        if not self.browser:
+        # Always start fresh browser to avoid thread conflicts
+        browser_started = False
+        try:
             if not self.start_browser():
                 return {"success": False, "token": None}
+            browser_started = True
+        except Exception:
+            return {"success": False, "token": None}
 
-        max_retries = 3
+        max_retries = 2
         for attempt in range(max_retries):
             try:
                 # Navigate to target with silent error handling
-                print(f"[*] Navigating to {service_url} (attempt {attempt+1}/{max_retries})...")
-                try:
-                    self.page.goto(service_url, wait_until="networkidle", timeout=25000)
-                except Exception as nav_error:
-                    if "greenlet" in str(nav_error).lower() or "thread" in str(nav_error).lower():
-                        # Thread conflict - need to restart browser
-                        print("[*] Browser thread conflict detected, restarting...")
-                        self.close()
-                        time.sleep(1)
-                        if not self.start_browser():
-                            continue
-                        # Retry navigation
-                        self.page.goto(service_url, wait_until="networkidle", timeout=25000)
-                    else:
-                        raise
+                if self.debug:
+                    print(f"[*] Navigating to {service_url} (attempt {attempt+1}/{max_retries})...")
                 
-                time.sleep(random.uniform(1.5, 2.5))
+                try:
+                    self.page.goto(service_url, wait_until="domcontentloaded", timeout=20000)
+                    time.sleep(random.uniform(2.0, 3.0))
+                except Exception as nav_error:
+                    if attempt < max_retries - 1:
+                        time.sleep(1)
+                        continue
+                    raise
                 
                 # Find Captcha Iframe
                 iframe = self._find_captcha_iframe()
                 if not iframe:
-                    print("[*] No captcha found (might be passed already).")
+                    if self.debug:
+                        print("[*] No captcha found (might be passed already).")
+                    # Close browser cleanly
+                    if browser_started:
+                        try:
+                            self.close()
+                        except:
+                            pass
                     return {"success": True, "token": "NO_CHALLENGE"}
                 
                 frame = iframe.content_frame()
                 if not frame:
-                    raise Exception("Could not access iframe content")
+                    if attempt < max_retries - 1:
+                        time.sleep(1)
+                        continue
+                    if browser_started:
+                        try:
+                            self.close()
+                        except:
+                            pass
+                    return {"success": False, "token": None}
 
                 # Solve the visual challenge
-                print(f"[*] Attempting to solve rotation challenge...")
+                if self.debug:
+                    print(f"[*] Attempting to solve rotation challenge...")
+                    
                 if self._solve_rotation_challenge(frame):
                     time.sleep(random.uniform(1.5, 2.5))
                     
                     # Extract Token
                     token = self._extract_token()
                     if token and len(token) > 20:
-                        print(f"[+] ✅ SOLVED! Token: {token[:30]}...")
+                        if self.debug:
+                            print(f"[+] ✅ SOLVED! Token: {token[:30]}...")
+                        # Close browser cleanly
+                        if browser_started:
+                            try:
+                                self.close()
+                            except:
+                                pass
                         return {"success": True, "token": token}
                     else:
-                        # Even if we can't extract token, the captcha might be solved
-                        # Let the login flow handle token verification
-                        print("[*] Visual solve successful, proceeding with login...")
+                        # Visual solve successful even without explicit token
+                        if self.debug:
+                            print("[*] Visual solve successful, proceeding with login...")
+                        # Close browser cleanly
+                        if browser_started:
+                            try:
+                                self.close()
+                            except:
+                                pass
                         return {"success": True, "token": "VISUAL_SUCCESS"}
                 
-                print(f"[-] Attempt {attempt+1} failed to solve visually.")
+                if self.debug:
+                    print(f"[-] Attempt {attempt+1} failed to solve visually.")
                 
                 if attempt < max_retries - 1:
-                    # Wait before retry
-                    time.sleep(random.uniform(2, 3))
-                    # Try refreshing the page
-                    try:
-                        self.page.reload(wait_until="networkidle", timeout=20000)
-                        time.sleep(2)
-                    except:
-                        pass
+                    time.sleep(random.uniform(1.5, 2.5))
                 
             except Exception as e:
                 error_msg = str(e)
-                # Silence greenlet/thread errors in output
-                if "greenlet" in error_msg.lower() or "thread" in error_msg.lower():
-                    print(f"[-] Thread conflict on attempt {attempt+1}, retrying...")
-                else:
-                    print(f"[-] Error during solve: {e}")
-                
-                if self.debug:
-                    import traceback
-                    traceback.print_exc()
-                
                 if attempt < max_retries - 1:
-                    time.sleep(random.uniform(2, 3))
-                    # Restart browser on thread errors
-                    if "greenlet" in error_msg.lower() or "thread" in error_msg.lower():
-                        self.close()
-                        time.sleep(1)
-                        if not self.start_browser():
-                            break
-                continue
+                    time.sleep(random.uniform(1.0, 1.5))
+                    continue
         
-        print("[-] ❌ All captcha solving attempts failed")
+        # Cleanup on failure
+        if browser_started:
+            try:
+                self.close()
+            except:
+                pass
+        
+        if self.debug:
+            print("[-] ❌ All captcha solving attempts failed")
         return {"success": False, "token": None}
 
     def _find_captcha_iframe(self):

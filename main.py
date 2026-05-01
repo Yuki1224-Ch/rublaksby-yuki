@@ -82,7 +82,7 @@ def check_account_task(account_line, proxy_dict):
                 
                 # Use solve_captcha_and_retry with password parameter
                 solved = session.solve_captcha_and_retry(
-                    lambda sk, url, blob: solve_captcha_wrapper.__globals__.get('get_solver_instance')().solve_with_token(sk, url, blob).get('token'),
+                    lambda sk, url, blob: solve_captcha_wrapper.__globals__.get('get_solver_instance')().solve_with_token(sk, url, blob),
                     password=password
                 )
                 

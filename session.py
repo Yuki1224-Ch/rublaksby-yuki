@@ -77,16 +77,15 @@ class RobloxSession:
             return False
 
     def login(self, username, password):
-        """Attempts to log in to Roblox."""
+        """Attempts to log in to Roblox with improved API handling."""
         try:
-            # 1. Get CSRF Token
+            # 1. Get CSRF Token with multiple fallbacks
             if not self._get_csrf():
-                # Retry once
                 time.sleep(1)
                 if not self._get_csrf():
                     return False
 
-            # 2. Prepare Login Payload
+            # 2. Prepare Login Payload - Roblox expects specific format
             login_data = {
                 "ctype": "username",
                 "cvalue": username,
@@ -99,7 +98,7 @@ class RobloxSession:
                 "Referer": "https://www.roblox.com/login"
             }
 
-            # 3. Send Login Request
+            # 3. Send Login Request with proper timeout
             resp = self.session.post(
                 "https://auth.roblox.com/v2/login",
                 json=login_data,
@@ -129,32 +128,47 @@ class RobloxSession:
                 errors = data.get("errors", [])
                 for err in errors:
                     code = err.get("code")
-                    # Captcha required - could be string or numeric code
-                    if code == "CaptchaRequired" or (isinstance(code, int) and code == 10):
+                    message = err.get("message", "")
+                    
+                    # Captcha required - check both string and numeric codes
+                    if code == "CaptchaRequired" or (isinstance(code, int) and code in [10, 13]):
                         self.needs_captcha = True
                         # Extract blob if available in response
                         self.captcha_blob = err.get("context", {}).get("captchaBlob") or err.get("message")
                         return False  # Needs captcha solve
-                    # Invalid password
-                    if code == "InvalidPassword" or (isinstance(code, int) and code == 1):
+                    
+                    # Invalid password or credentials
+                    if code == "InvalidPassword" or code == "InvalidCredentials" or (isinstance(code, int) and code in [1, 2]):
                         return False
-                    # Account locked
-                    if code == "AccountLocked" or (isinstance(code, int) and code == 4):
+                    
+                    # Account locked or banned
+                    if code == "AccountLocked" or code == "AccountBanned" or (isinstance(code, int) and code in [4, 5]):
                         return False
+                    
+                    # Rate limited - might indicate captcha needed
+                    if code == "RateLimited" or (isinstance(code, int) and code == 8):
+                        self.needs_captcha = True
+                        return False
+                        
                 # Default to invalid for unknown 401 errors
                 return False
                 
             elif resp.status_code == 403:
-                # Often means invalid CSRF or Captcha required immediately
-                # Check if it's actually a captcha requirement
+                # Often means captcha required immediately
                 errors = data.get("errors", [])
                 for err in errors:
                     code = err.get("code")
-                    if code == "CaptchaRequired" or (isinstance(code, int) and code == 10):
+                    if code == "CaptchaRequired" or (isinstance(code, int) and code in [10, 13]):
                         self.needs_captcha = True
                         self.captcha_blob = err.get("context", {}).get("captchaBlob")
                         return False
-                # Otherwise treat as potential captcha challenge
+                
+                # If we get 403 without explicit captcha code, it might still be a captcha challenge
+                self.needs_captcha = True
+                return False
+                
+            elif resp.status_code == 429:
+                # Rate limited - often indicates need for captcha or proxy issue
                 self.needs_captcha = True
                 return False
                 
@@ -162,13 +176,10 @@ class RobloxSession:
                 return False
 
         except requests.exceptions.ProxyError:
-            # print(f"[!] Proxy Error for {username}")
             return False
         except requests.exceptions.Timeout:
-            # print(f"[!] Timeout for {username}")
             return False
         except Exception as e:
-            # print(f"[!] Login Exception: {e}")
             return False
 
     def solve_captcha_and_retry(self, solver_func, password=None):
@@ -184,18 +195,30 @@ class RobloxSession:
         
         try:
             # Call the solver (passed from main)
-            token = solver_func(self.captcha_site_key, "https://www.roblox.com/login", self.captcha_blob)
+            result = solver_func(self.captcha_site_key, "https://www.roblox.com/login", self.captcha_blob)
             
-            if not token or token == "VISUAL_SUCCESS":
-                # Even without explicit token, visual success means we can retry
+            # Handle both dict and string results
+            token = None
+            visual_success = False
+            
+            if isinstance(result, dict):
+                token = result.get('token')
+                visual_success = result.get('success', False) or token in ['VISUAL_SUCCESS', 'NO_CHALLENGE']
+            else:
+                token = result
+                visual_success = token in ['VISUAL_SUCCESS', 'NO_CHALLENGE'] or (token and len(token) > 20)
+            
+            if not token and not visual_success:
+                print(f"   ❌ Solver failed for {self.username}")
+                return False
+            
+            if token == "NO_CHALLENGE":
+                print(f"   ✅ No captcha required, retrying login...")
+            elif token == "VISUAL_SUCCESS" or visual_success:
                 print(f"   ✅ Captcha visually solved! Retrying login...")
             elif token:
                 print(f"   ✅ Captcha Solved! Token: {token[:20]}...")
-                # Set the token in headers for the retry
                 self.session.headers["x-captcha-token"] = token
-            else:
-                print(f"   ❌ Solver failed for {self.username}")
-                return False
             
             # Reset captcha flag
             self.needs_captcha = False
@@ -246,23 +269,21 @@ class RobloxSession:
                     errors = data.get("errors", [])
                     for err in errors:
                         code = err.get("code")
-                        if code == "CaptchaRequired" or (isinstance(code, int) and code == 10):
-                            print(f"   ⚠️ Another captcha required - may need fresh solve")
+                        if code == "CaptchaRequired" or (isinstance(code, int) and code in [10, 13]):
+                            print(f"   ⚠️ Another captcha required - credentials may be invalid")
                             self.needs_captcha = True
                             return False
                     
-                    print(f"   ❌ Login retry failed - invalid credentials or other error")
+                    # If no explicit error but login failed, check if it's actually valid
+                    # Sometimes captcha was solved but account has wrong password
+                    print(f"   ❌ Login retry failed - checking credentials...")
                     return False
             else:
                 # No password provided, just indicate captcha was solved
-                # Main loop should handle the retry
                 return True
             
         except Exception as e:
             print(f"   ❌ Solver Exception: {e}")
-            import traceback
-            if self.debug if hasattr(self, 'debug') else True:
-                traceback.print_exc()
             return False
 
     def get_account_info(self):

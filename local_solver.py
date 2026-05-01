@@ -110,7 +110,7 @@ def solve_captcha_wrapper(session):
                 
                 if hasattr(session, 'set_captcha_token'):
                     session.set_captcha_token(result_container['token'])
-                    token_preview = result_container['token'][:20] if result_container['token'] else 'N/A'
+                    token_preview = result_container['token'][:20] if result_container['token'] and len(result_container['token']) > 20 else 'N/A'
                     print(f"[+] ✅ Captcha Solved! Token: {token_preview}...")
                 else:
                     print("[!] Session missing set_captcha_token method")
@@ -119,13 +119,10 @@ def solve_captcha_wrapper(session):
                 
         except Exception as e:
             print(f"[-] 💥 Solver Thread Crash: {e}")
-            import traceback
-            traceback.print_exc()
         finally:
             event.set()
 
-    t = threading.Thread(target=run_solver_task)
-    t.daemon = True
+    t = threading.Thread(target=run_solver_task, daemon=True)
     t.start()
     
     completed = event.wait(timeout=60)
