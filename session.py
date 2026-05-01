@@ -234,3 +234,6 @@ class RobloxSession:
         """Helper to manually set captcha token if solved externally."""
         self.session.headers["x-captcha-token"] = token
         self.needs_captcha = False
+
+# Alias for backwards compatibility with roblox.py
+Session = RobloxSession

@@ -167,9 +167,9 @@ def main():
                 with stats_lock:
                     stats_text = (
                         f"[green]Valid:[/green] {stats['valid']}  "
-                        f"[red]Invalid:[/green] {stats['invalid']}  "
-                        f"[yellow]Captcha:[/green] {stats['captcha_solved']}  "
-                        f"[magenta]Errors:[/green] {stats['errors']}"
+                        f"[red]Invalid:[/red] {stats['invalid']}  "
+                        f"[yellow]Captcha:[/yellow] {stats['captcha_solved']}  "
+                        f"[magenta]Errors:[/magenta] {stats['errors']}"
                     )
                     
                     log_table = Table(show_header=False, box=None, padding=(0, 1))

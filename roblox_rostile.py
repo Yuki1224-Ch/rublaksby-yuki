@@ -2,18 +2,24 @@ import sys, os, string, random, re
 from time import sleep, time
 from json import loads, dumps
 from base64 import b64decode, b64encode
-from custom_solver import get_token
-from thread_lock import ThreadLock
+from local_solver import get_token
+from thread_lock import ThreadLock, lock
 from counter import Counter
 from combocheck import ComboCheck
-from session import Session
+from session import Session, RobloxSession
 from output import Output
-from account_info import AccountInfo, has_payment_info
+from account_info import AccountInfo
 from auth_intent import AuthIntent
 from rostile import Rostile
 from ip_intelligence import IpIntelligence
-from util import Util
+from util import get_config
 from secure import Secure
+
+# Alias for backwards compatibility
+class Util:
+    @staticmethod
+    def get_config():
+        return get_config()
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 

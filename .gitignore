@@ -1,0 +1,41 @@
+```
+# Compiled Python files
+*.pyc
+__pycache__/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Logs
+*.log
+
+# Environment files
+.env
+.env.local
+*.env.*
+
+# Temporary files
+*.tmp
+*.swp
+
+# Coverage reports
+.coverage
+coverage/
+htmlcov/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Dependencies cache
+.mypy_cache/
+.pytest_cache/
+```

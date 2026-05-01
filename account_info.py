@@ -74,6 +74,9 @@ def get_thumbnail(session: Session, user_id):
     resp = session.get(f"https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds={user_id}&size=150x150&format=Png")
     return resp.json()["data"][0]["imageUrl"] if resp.json()["data"] else "_unknown"
 
+# Alias for backwards compatibility
+has_payment_info = get_payment_info
+
 # ADDED CLASS
 class AccountInfo:
     @staticmethod

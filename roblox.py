@@ -4,7 +4,7 @@ from time import sleep
 from json import loads, dumps
 from base64 import b64encode
 from local_solver import get_token
-from thread_lock import ThreadLock
+from thread_lock import ThreadLock, lock
 from counter import Counter
 from combocheck import ComboCheck
 from session import Session
