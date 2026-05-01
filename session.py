@@ -189,6 +189,10 @@ class RobloxSession:
         password: The user's password for retrying login after captcha solve.
         """
         if not self.needs_captcha:
+            # No captcha needed, just try login directly
+            if password and self.username:
+                print(f"   [*] No captcha required, attempting direct login...")
+                return self._do_login_request(password)
             return False
             
         print(f"   ⚡ Solving Captcha for {self.username}...")
@@ -253,7 +257,7 @@ class RobloxSession:
                     timeout=15
                 )
                 
-                data = resp.json()
+                data = resp.json() if resp.text else {}
                 
                 if resp.status_code == 200 and data.get("user"):
                     self.is_logged_in = True
@@ -269,22 +273,57 @@ class RobloxSession:
                     errors = data.get("errors", [])
                     for err in errors:
                         code = err.get("code")
-                        if code == "CaptchaRequired" or (isinstance(code, int) and code in [10, 13]):
-                            print(f"   ⚠️ Another captcha required - credentials may be invalid")
+                        msg = err.get("message", "")
+                        
+                        # Captcha required again
+                        if code == 10 or code == "CaptchaRequired" or "Captcha" in msg:
+                            print(f"   [yellow]Another captcha required - solver may have failed[/yellow]")
                             self.needs_captcha = True
                             return False
+                        
+                        # Invalid credentials - account is actually bad
+                        if code == 4 or "Incorrect" in msg or "Invalid" in msg:
+                            print(f"   [red]Invalid credentials confirmed (captcha was real but account is bad)[/red]")
+                            return False
+                        
+                        # Account locked/banned
+                        if code == 13 or code == 8 or "Locked" in msg or "Banned" in msg:
+                            print(f"   [red]Account locked or banned[/red]")
+                            return False
                     
-                    # If no explicit error but login failed, check if it's actually valid
-                    # Sometimes captcha was solved but account has wrong password
-                    print(f"   ❌ Login retry failed - checking credentials...")
+                    # If no specific error but still failed, try one more time with fresh CSRF
+                    print(f"   [yellow]Login failed, trying once more with fresh token...[/yellow]")
+                    time.sleep(1)
+                    self._get_csrf()
+                    headers["x-csrf-token"] = self.csrf_token
+                    
+                    resp2 = self.session.post(
+                        "https://auth.roblox.com/v2/login",
+                        json=login_data,
+                        headers=headers,
+                        timeout=15
+                    )
+                    
+                    data2 = resp2.json() if resp2.text else {}
+                    
+                    if resp2.status_code == 200 and data2.get("user"):
+                        self.is_logged_in = True
+                        self.user_id = data2["user"]["id"]
+                        if ".ROBLOSECURITY" in resp2.cookies:
+                            self.session.cookies.set(".ROBLOSECURITY", resp2.cookies[".ROBLOSECURITY"])
+                        print(f"   [green]Login successful on retry![/green]")
+                        return True
+                    
+                    # Final failure
+                    print(f"   [red]Login retry failed - account likely invalid[/red]")
                     return False
-            else:
-                # No password provided, just indicate captcha was solved
-                return True
-            
+                    
         except Exception as e:
-            print(f"   ❌ Solver Exception: {e}")
+            print(f"   [red]Captcha solve error: {e}[/red]")
             return False
+        
+        # No password provided, just indicate captcha was solved
+        return True
 
     def get_account_info(self):
         """Fetches Robux and other details for the logged-in user."""
