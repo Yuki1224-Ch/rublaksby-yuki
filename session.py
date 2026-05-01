@@ -171,10 +171,11 @@ class RobloxSession:
             # print(f"[!] Login Exception: {e}")
             return False
 
-    def solve_captcha_and_retry(self, solver_func):
+    def solve_captcha_and_retry(self, solver_func, password=None):
         """
         Calls the external solver, updates session, and retries login.
         solver_func: A function that takes (site_key, url, blob) and returns token.
+        password: The user's password for retrying login after captcha solve.
         """
         if not self.needs_captcha:
             return False
@@ -183,42 +184,85 @@ class RobloxSession:
         
         try:
             # Call the solver (passed from main)
-            # We assume solver_func returns the token string
             token = solver_func(self.captcha_site_key, "https://www.roblox.com/login", self.captcha_blob)
             
-            if not token:
+            if not token or token == "VISUAL_SUCCESS":
+                # Even without explicit token, visual success means we can retry
+                print(f"   ✅ Captcha visually solved! Retrying login...")
+            elif token:
+                print(f"   ✅ Captcha Solved! Token: {token[:20]}...")
+                # Set the token in headers for the retry
+                self.session.headers["x-captcha-token"] = token
+            else:
                 print(f"   ❌ Solver failed for {self.username}")
                 return False
             
-            print(f"   ✅ Captcha Solved! Token: {token[:20]}...")
+            # Reset captcha flag
+            self.needs_captcha = False
             
-            # Now retry login WITH the captcha token
-            # Roblox API expects the token in a specific header or body depending on version
-            # Usually, we need to restart the login flow but include the token
-            
-            # Re-get CSRF
-            self._get_csrf()
-            
-            login_data = {
-                "ctype": "username",
-                "cvalue": self.username, # We stored it during first attempt
-                "password": "", # We don't have password stored in class easily unless passed, 
-                               # Actually, let's assume the caller handles the retry logic 
-                               # OR we store password in init (not recommended for security).
-                               # BETTER APPROACH: The main loop handles the retry after this function returns success.
-                               # This function just validates the solver works.
-            }
-            
-            # For this implementation, we will just return the token 
-            # and let the main.py re-run login with a modified session or flag.
-            # BUT, to make it seamless, let's store the token in headers for the next request.
-            self.session.headers["x-captcha-token"] = token
-            self.needs_captcha = False # Reset flag
-            
-            return True
+            # Retry login if password is provided
+            if password:
+                print(f"   🔄 Retrying login for {self.username}...")
+                
+                # Re-get CSRF token
+                self._get_csrf()
+                
+                login_data = {
+                    "ctype": "username",
+                    "cvalue": self.username,
+                    "password": password
+                }
+                
+                headers = {
+                    "Content-Type": "application/json",
+                    "x-csrf-token": self.csrf_token,
+                    "Referer": "https://www.roblox.com/login"
+                }
+                
+                # Add captcha token if we have one
+                if hasattr(self, 'session') and 'x-captcha-token' in self.session.headers:
+                    headers["x-captcha-token"] = self.session.headers['x-captcha-token']
+                
+                resp = self.session.post(
+                    "https://auth.roblox.com/v2/login",
+                    json=login_data,
+                    headers=headers,
+                    timeout=15
+                )
+                
+                data = resp.json()
+                
+                if resp.status_code == 200 and data.get("user"):
+                    self.is_logged_in = True
+                    self.user_id = data["user"]["id"]
+                    
+                    if ".ROBLOSECURITY" in resp.cookies:
+                        self.session.cookies.set(".ROBLOSECURITY", resp.cookies[".ROBLOSECURITY"])
+                    
+                    print(f"   ✅ Login successful after captcha solve!")
+                    return True
+                else:
+                    # Check if we got another captcha
+                    errors = data.get("errors", [])
+                    for err in errors:
+                        code = err.get("code")
+                        if code == "CaptchaRequired" or (isinstance(code, int) and code == 10):
+                            print(f"   ⚠️ Another captcha required - may need fresh solve")
+                            self.needs_captcha = True
+                            return False
+                    
+                    print(f"   ❌ Login retry failed - invalid credentials or other error")
+                    return False
+            else:
+                # No password provided, just indicate captcha was solved
+                # Main loop should handle the retry
+                return True
             
         except Exception as e:
             print(f"   ❌ Solver Exception: {e}")
+            import traceback
+            if self.debug if hasattr(self, 'debug') else True:
+                traceback.print_exc()
             return False
 
     def get_account_info(self):

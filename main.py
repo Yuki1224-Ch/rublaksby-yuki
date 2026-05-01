@@ -79,13 +79,16 @@ def check_account_task(account_line, proxy_dict):
         if not login_success:
             if session.needs_captcha:
                 add_log(f"⚡ Captcha detected for {username}...", "yellow")
-                solved = solve_captcha_wrapper(session)
                 
-                if solved:
+                # Use solve_captcha_and_retry with password parameter
+                solved = session.solve_captcha_and_retry(
+                    lambda sk, url, blob: solve_captcha_wrapper.__globals__.get('get_solver_instance')().solve_with_token(sk, url, blob).get('token'),
+                    password=password
+                )
+                
+                if solved and session.is_logged_in:
                     update_stats("captcha_solved")
-                    time.sleep(1)
-                    # Retry login with same credentials after captcha solved
-                    login_success = session.login(username, password)
+                    add_log(f"✅ {username}: Captcha solved & logged in!", "green")
                 else:
                     update_stats("errors")
                     add_log(f"❌ {username}: Captcha failed", "red")
