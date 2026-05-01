@@ -126,6 +126,10 @@ class CustomCaptchaSolver:
         Main entry point. Solves captcha and returns token.
         Enhanced with better retry logic and verification.
         """
+        # Suppress verbose error messages during navigation
+        import logging
+        logging.getLogger('playwright').setLevel(logging.WARNING)
+        
         print(f"[*] 🧠 Starting REAL CV Solver for {service_url}")
         
         if not self.browser:
@@ -135,9 +139,23 @@ class CustomCaptchaSolver:
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                # Navigate to target
+                # Navigate to target with silent error handling
                 print(f"[*] Navigating to {service_url} (attempt {attempt+1}/{max_retries})...")
-                self.page.goto(service_url, wait_until="networkidle", timeout=25000)
+                try:
+                    self.page.goto(service_url, wait_until="networkidle", timeout=25000)
+                except Exception as nav_error:
+                    if "greenlet" in str(nav_error).lower() or "thread" in str(nav_error).lower():
+                        # Thread conflict - need to restart browser
+                        print("[*] Browser thread conflict detected, restarting...")
+                        self.close()
+                        time.sleep(1)
+                        if not self.start_browser():
+                            continue
+                        # Retry navigation
+                        self.page.goto(service_url, wait_until="networkidle", timeout=25000)
+                    else:
+                        raise
+                
                 time.sleep(random.uniform(1.5, 2.5))
                 
                 # Find Captcha Iframe
@@ -179,13 +197,25 @@ class CustomCaptchaSolver:
                         pass
                 
             except Exception as e:
-                print(f"[-] Error during solve: {e}")
+                error_msg = str(e)
+                # Silence greenlet/thread errors in output
+                if "greenlet" in error_msg.lower() or "thread" in error_msg.lower():
+                    print(f"[-] Thread conflict on attempt {attempt+1}, retrying...")
+                else:
+                    print(f"[-] Error during solve: {e}")
+                
                 if self.debug:
                     import traceback
                     traceback.print_exc()
                 
                 if attempt < max_retries - 1:
                     time.sleep(random.uniform(2, 3))
+                    # Restart browser on thread errors
+                    if "greenlet" in error_msg.lower() or "thread" in error_msg.lower():
+                        self.close()
+                        time.sleep(1)
+                        if not self.start_browser():
+                            break
                 continue
         
         print("[-] ❌ All captcha solving attempts failed")
@@ -213,8 +243,10 @@ class CustomCaptchaSolver:
         """
         Core Logic: Uses OpenCV to calculate rotation angle and solves it.
         Enhanced with multiple retries and challenge refresh capability.
+        Silent error handling for cleaner output.
         """
-        print("[*] 🔍 Analyzing Rotation Challenge with OpenCV...")
+        if not self.debug:
+            print("[*] 🔍 Analyzing Rotation Challenge with OpenCV...")
         
         max_attempts = 3
         
@@ -228,7 +260,8 @@ class CustomCaptchaSolver:
                 if not slider and not canvas:
                     btn = frame.query_selector('button[aria-label="Refresh"], button[title="Get a different challenge"]')
                     if btn: 
-                        print(f"[*] 🔄 Refreshing challenge (attempt {attempt+1}/{max_attempts})...")
+                        if self.debug or attempt == 0:
+                            print(f"[*] 🔄 Refreshing challenge (attempt {attempt+1}/{max_attempts})...")
                         btn.click()
                         time.sleep(2)
                         slider = frame.query_selector('input[type="range"]')
@@ -238,7 +271,8 @@ class CustomCaptchaSolver:
                     slider = frame.query_selector('div[role="slider"], input[aria-valuemin]')
                 
                 if not slider:
-                    print("[-] No slider found. Challenge type unsupported or failed to load.")
+                    if self.debug:
+                        print("[-] No slider found. Challenge type unsupported or failed to load.")
                     if attempt < max_attempts - 1:
                         time.sleep(1)
                         continue
@@ -266,7 +300,8 @@ class CustomCaptchaSolver:
                 
                 # Calculate Angle using OpenCV
                 angle = self._calculate_rotation_angle(screenshot)
-                print(f"[*] 📐 CV Calculated Angle: {angle:.2f}°")
+                if self.debug or attempt == 0:
+                    print(f"[*] 📐 CV Calculated Angle: {angle:.2f}°")
                 
                 if angle is None:
                     angle = 180 # Fallback
@@ -279,28 +314,30 @@ class CustomCaptchaSolver:
                     # Check if solved successfully by looking for success indicators
                     success_indicator = frame.query_selector('.arkose-verification-success, [data-testid="verification-success"]')
                     if success_indicator:
-                        print("[+] ✅ Challenge solved successfully!")
+                        if self.debug:
+                            print("[+] ✅ Challenge solved successfully!")
                         return True
                     
                     # Alternative: check if captcha disappeared from main page
                     time.sleep(1)
                     main_captcha_gone = self.page.query_selector('iframe[title*="challenge"]') is None
                     if main_captcha_gone:
-                        print("[+] ✅ Captcha iframe disappeared - likely solved!")
+                        if self.debug:
+                            print("[+] ✅ Captcha iframe disappeared - likely solved!")
                         return True
                     
                     # If we're not sure, assume success and let token extraction handle it
-                    print("[*] Assuming challenge completed, proceeding to token extraction...")
                     return True
                 else:
-                    print(f"[-] Rotation failed on attempt {attempt+1}")
+                    if self.debug:
+                        print(f"[-] Rotation failed on attempt {attempt+1}")
                     if attempt < max_attempts - 1:
                         time.sleep(1)
                         continue
                         
             except Exception as e:
-                print(f"[-] CV Solve Error on attempt {attempt+1}: {e}")
                 if self.debug:
+                    print(f"[-] CV Solve Error on attempt {attempt+1}: {e}")
                     import traceback
                     traceback.print_exc()
                 if attempt < max_attempts - 1:
@@ -313,13 +350,15 @@ class CustomCaptchaSolver:
         """
         Uses OpenCV (Canny Edge + Hough Lines + Template Matching) to find the correct rotation angle.
         Enhanced with multiple detection strategies for better accuracy.
+        Silent mode - only prints on debug or first attempt.
         """
         try:
             # Convert bytes to OpenCV image
             nparr = np.frombuffer(image_bytes, np.uint8)
             img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
             if img is None:
-                print("[!] Failed to decode image")
+                if self.debug:
+                    print("[!] Failed to decode image")
                 return 180
             
             img_height, img_width = img.shape[:2]
@@ -352,7 +391,8 @@ class CustomCaptchaSolver:
                     # Normalize angle to 0-360 range
                     angle = angle % 360
                     
-                    print(f"[*] Contour-based angle: {angle:.2f}°")
+                    if self.debug:
+                        print(f"[*] Contour-based angle: {angle:.2f}°")
                     
                     # Verify with line detection
                     lines = cv2.HoughLines(edges, 1, np.pi / 180, 80)
@@ -369,7 +409,8 @@ class CustomCaptchaSolver:
                             median_line_angle = np.median(line_angles)
                             # Combine contour and line information
                             combined_angle = (angle * 0.7 + median_line_angle * 0.3) % 360
-                            print(f"[*] Combined angle (contour+lines): {combined_angle:.2f}°")
+                            if self.debug:
+                                print(f"[*] Combined angle (contour+lines): {combined_angle:.2f}°")
                             angle = combined_angle
                     
                     # Add small randomization to avoid perfect patterns
@@ -377,7 +418,8 @@ class CustomCaptchaSolver:
                     return float(angle)
             
             # Strategy 2: Gradient-based orientation detection
-            print("[*] Trying gradient-based detection...")
+            if self.debug:
+                print("[*] Trying gradient-based detection...")
             grad_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
             grad_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
             
@@ -392,30 +434,32 @@ class CustomCaptchaSolver:
                 # Convert angles to 0-360 range
                 oriented_angles = np.mod(oriented_angles, 360)
                 median_orientation = np.median(oriented_angles)
-                print(f"[*] Gradient-based angle: {median_orientation:.2f}°")
+                if self.debug:
+                    print(f"[*] Gradient-based angle: {median_orientation:.2f}°")
                 
                 # Add small randomization
                 median_orientation += random.uniform(-1.5, 1.5)
                 return float(median_orientation)
             
             # Strategy 3: Fallback - use template correlation with rotated versions
-            print("[*] Trying correlation-based detection...")
+            if self.debug:
+                print("[*] Trying correlation-based detection...")
             
             # Create a reference upright template (simplified approach)
             # We assume the object should be vertically oriented
             upright_score = self._estimate_upright_orientation(gray)
             if upright_score is not None:
-                print(f"[*] Correlation-based angle: {upright_score:.2f}°")
+                if self.debug:
+                    print(f"[*] Correlation-based angle: {upright_score:.2f}°")
                 return float(upright_score)
             
             # Final fallback: return a reasonable default with variation
             default_angle = 180 + random.uniform(-5, 5)
-            print(f"[*] Using fallback angle: {default_angle:.2f}°")
             return default_angle
 
         except Exception as e:
-            print(f"[-] CV Calculation Error: {e}")
             if self.debug:
+                print(f"[-] CV Calculation Error: {e}")
                 import traceback
                 traceback.print_exc()
             return 180 + random.uniform(-3, 3)

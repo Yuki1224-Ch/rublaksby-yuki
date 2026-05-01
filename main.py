@@ -93,8 +93,7 @@ def check_account_task(account_line, proxy_dict):
                     update_stats("errors")
                     add_log(f"❌ {username}: Captcha failed", "red")
                     return
-            
-            if not login_success:
+            else:
                 update_stats("invalid")
                 add_log(f"❌ {username}: Invalid credentials", "red")
                 return
@@ -118,7 +117,10 @@ def check_account_task(account_line, proxy_dict):
 
     except Exception as e:
         update_stats("errors")
-        add_log(f"❌ Error: {str(e)[:40]}", "red")
+        error_msg = str(e)[:40]
+        # Silence greenlet/thread errors
+        if "greenlet" not in error_msg.lower() and "thread" not in error_msg.lower():
+            add_log(f"❌ Error: {error_msg}", "red")
 
 def create_layout():
     layout = Layout()
