@@ -146,84 +146,128 @@ class RealCaptchaSolver:
         timeout: int = 180
     ) -> Dict[str, Any]:
         """
-        ADVANCED: Directly open FunCaptcha without login page.
-        
-        Opens the Arkose Labs captcha directly, solves it, returns token.
-        This is faster and more efficient - no need to load login page!
+        ADVANCED: Solve FunCaptcha with proper context.
+        Uses a data URI with embedded HTML to avoid Access Denied.
         """
+        import tempfile
+        import os
+        import urllib.parse
+        
         if not self.browser:
             if not self.start_browser():
                 return {"success": False, "token": None}
         
-        # Direct FunCaptcha URL - no login page needed!
-        captcha_url = f"https://client-api.arkoselabs.com/v2/1.5.5/html/fc-game-core.html"
-        params = f"?pk={site_key}&ar=1&api_url=https://client-api.arkoselabs.com/v2"
+        print("[SOLVER] 🧠 AI Mode: Loading captcha with proper context...")
         
-        if blob:
-            # URL encode the blob if present
-            import urllib.parse
-            params += f"&blob={urllib.parse.quote(blob)}"
+        # Build the captcha HTML page with proper Arkose setup
+        blob_param = f'&data[blob]={urllib.parse.quote(blob)}' if blob else ''
         
-        full_url = captcha_url + params
-        self.log(f"Opening captcha DIRECTLY: {full_url[:80]}...")
+        html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Verification</title>
+    <style>
+        body {{ margin: 0; padding: 20px; background: #232323; display: flex; justify-content: center; }}
+        #fc-widget {{ margin-top: 50px; }}
+    </style>
+</head>
+<body>
+    <div id="fc-widget"></div>
+    <script>
+        (function() {{
+            var pk = "{site_key}";
+            var s = document.createElement('script');
+            s.src = 'https://client-api.arkoselabs.com/v2/b/api.js';
+            s.async = true;
+            s.onload = function() {{
+                new FunCaptcha({{
+                    public_key: pk,
+                    target: '#fc-widget',
+                    callback: function(token) {{
+                        window.__token = token;
+                        console.log('TOKEN:', token);
+                    }},
+                    on_error: function(e) {{
+                        console.error('Error:', e);
+                    }}
+                }});
+            }};
+            document.head.appendChild(s);
+        }})();
+    </script>
+</body>
+</html>"""
+        
+        # Save to temp file
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False) as f:
+            f.write(html_content)
+            temp_path = f.name
         
         try:
-            self.page.goto(full_url, timeout=30000)
-            self._human_delay(1, 2)
+            # Load the HTML file
+            self.page.goto(f"file://{temp_path}", timeout=30000)
+            print("[SOLVER] ⏳ Waiting for captcha to load...")
+            self._human_delay(3, 4)
             
-            # Wait for captcha iframe
+            # Check if token already set (auto-pass)
+            token = self.page.evaluate("window.__token || null")
+            if token and len(token) > 50:
+                print("[SOLVER] ✅ Token auto-generated!")
+                self.solved_count += 1
+                return {"success": True, "token": token}
+            
+            # Find captcha iframe
             iframe = self._find_captcha_iframe()
             
-            if not iframe:
-                self.log("No captcha found - checking for direct captcha...")
-                # Maybe it's already loaded directly
-                return self._solve_direct_captcha(timeout)
-            
-            frame = iframe.content_frame()
-            if not frame:
-                return {"success": False, "token": None}
-            
-            # Solve the captcha
-            for attempt in range(10):
-                if self.debug:
-                    print(f"[*] Direct solve attempt {attempt + 1}/10")
-                
-                try:
-                    self._human_delay(0.5, 1)
+            if iframe:
+                frame = iframe.content_frame()
+                if frame:
+                    print("[SOLVER] 🧩 Solving captcha puzzle...")
                     
-                    # Try rotation challenge
-                    if self._solve_rotation(frame, iframe):
-                        self._human_delay(1, 2)
-                        if self._check_success():
-                            token = self._get_token()
+                    for attempt in range(10):
+                        self._human_delay(0.5, 1)
+                        
+                        # Try rotation
+                        if self._solve_rotation(frame, iframe):
+                            self._human_delay(1, 2)
+                            token = self.page.evaluate("window.__token || null")
                             if token:
+                                print(f"[SOLVER] ✅ Solved! (rotation)")
                                 self.solved_count += 1
-                                print(f"[+] ✅ DIRECT SOLVE! (Attempt {attempt + 1})")
                                 return {"success": True, "token": token}
-                    
-                    # Try click challenge
-                    elif self._solve_clicks(frame):
-                        self._human_delay(1, 2)
-                        if self._check_success():
-                            token = self._get_token()
+                        
+                        # Try clicks
+                        elif self._solve_clicks(frame):
+                            self._human_delay(1, 2)
+                            token = self.page.evaluate("window.__token || null")
                             if token:
+                                print(f"[SOLVER] ✅ Solved! (clicks)")
                                 self.solved_count += 1
-                                print(f"[+] ✅ DIRECT SOLVE! (Click challenge)")
                                 return {"success": True, "token": token}
-                    
-                    self._refresh(frame)
-                    self._human_delay(1, 2)
-                    
-                except Exception as e:
-                    self.log(f"Error: {e}")
+                        
+                        self._refresh(frame)
             
+            # Final token check
+            token = self.page.evaluate("window.__token || null")
+            if token:
+                self.solved_count += 1
+                return {"success": True, "token": token}
+            
+            print("[SOLVER] ❌ Could not solve")
             self.failed_count += 1
             return {"success": False, "token": None}
             
         except Exception as e:
-            self.log(f"Direct solve error: {e}")
+            print(f"[SOLVER] ❌ Error: {e}")
             return {"success": False, "token": None}
-    
+        finally:
+            try:
+                os.unlink(temp_path)
+            except:
+                pass
+
+
     def _solve_direct_captcha(self, timeout: int = 180) -> Dict[str, Any]:
         """Solve captcha when loaded directly on the page."""
         import time
