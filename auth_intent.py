@@ -1,11 +1,16 @@
 # auth_intent.py - FIXED & WORKING
-from curl_cffi import requests
 from base64 import b64encode
 from time import time
-from cryptography.hazmat.primitives import serialization, hashes
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.backends import default_backend
 import random
+
+try:
+    from cryptography.hazmat.primitives import serialization, hashes
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.backends import default_backend
+    HAS_CRYPTO = True
+except ImportError:
+    HAS_CRYPTO = False
+    print("[!] Install cryptography: pip install cryptography")
 
 class AuthIntent:
     @staticmethod
@@ -32,7 +37,14 @@ class AuthIntent:
         return b64encode(signature).decode('utf-8')
 
     @staticmethod
-    def get_auth_intent(session: requests.Session) -> dict | None:
+    def get_auth_intent(session) -> str | None:
+        """
+        Get auth intent for Roblox login.
+        Returns the secureAuthenticationIntent string or None if failed.
+        """
+        if not HAS_CRYPTO:
+            return None
+        
         try:
             # CRITICAL HEADERS - Updated for 2025
             session.headers.update({
@@ -60,10 +72,23 @@ class AuthIntent:
             url = "https://apis.roblox.com/hba-service/v1/getServerNonce"
             
             max_retries = 3
+            resp = None
+            
             for attempt in range(max_retries):
                 try:
-                    resp = session.get(url, impersonate="chrome124", timeout=10)
+                    # Try with curl_cffi first (better success rate)
+                    try:
+                        from curl_cffi import requests as cffi_requests
+                        cffi_session = cffi_requests.Session()
+                        cffi_session.headers.update(dict(session.headers))
+                        resp = cffi_session.get(url, impersonate="chrome124", timeout=10)
+                        if resp.status_code == 200:
+                            break
+                    except:
+                        pass
                     
+                    # Fallback to regular requests
+                    resp = session.get(url, timeout=10)
                     if resp.status_code == 200:
                         break
                     
@@ -78,28 +103,30 @@ class AuthIntent:
                         time_module.sleep(1.5 * (attempt + 1))
                     continue
             
-            if resp.status_code != 200:
-                print(f"[DEBUG] Failed to get nonce after {max_retries} attempts (status: {resp.status_code})")
+            if resp is None or resp.status_code != 200:
+                print(f"[DEBUG] Failed to get nonce after {max_retries} attempts")
                 return None
 
             server_nonce = resp.text.strip().strip('"')
             if not server_nonce or len(server_nonce) < 10:
-                print(f"[DEBUG] Invalid server nonce received: {server_nonce[:20] if server_nonce else 'None'}...")
+                print(f"[DEBUG] Invalid server nonce received")
                 return None
 
             # Construct payload and sign
             payload = f"{client_public_key}|{client_epoch_timestamp}|{server_nonce}"
             sai_signature = AuthIntent.sign(private_key, AuthIntent.string_to_bytes(payload))
 
-            return {
+            # Return as JSON string for secureAuthenticationIntent
+            import json
+            sai = json.dumps({
                 "clientPublicKey": client_public_key,
                 "clientEpochTimestamp": client_epoch_timestamp,
                 "serverNonce": server_nonce,
                 "saiSignature": sai_signature
-            }
+            })
+            
+            return sai
 
         except Exception as e:
             print(f"[DEBUG] AuthIntent failed: {e}")
-            import traceback
-            traceback.print_exc()
             return None
