@@ -124,29 +124,47 @@ class Roblox:
                 self.counter.increment()
 
     def _perform_login(self):
-        ip = IpIntelligence(self.session)
+        # Setup headers first
         self.session.headers.update({
-            "Accept-Language": ip.get_accept_language(),
             "Origin": "https://www.roblox.com",
             "Referer": "https://www.roblox.com/login",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0 Safari/537.36"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Content-Type": "application/json",
         })
 
-        auth = AuthIntent.get_auth_intent(self.session)
-        if not auth:
-            Output("ERROR").log("Failed to get auth intent")
-            return
-        self.sai = auth
+        # Get auth intent (may be empty for some accounts)
+        print(f"[LOGIN] Getting auth intent for {self.account[0]}...")
+        self.sai = AuthIntent.get_auth_intent(self.session)
+        if self.sai:
+            print(f"[LOGIN] ✅ Auth intent ready")
+        else:
+            print(f"[LOGIN] ⚠️ No auth intent - continuing anyway")
 
+        # First, try to detect if username or email
         test = self.session.post("https://auth.roblox.com/v2/login", json={
             "ctype": "Username", "cvalue": self.account[0], "password": self.account[1]
         })
-        self.ctype = "Username" if test.status_code == 200 else "Email"
+        
+        # Determine ctype
+        if test.status_code == 200:
+            self.ctype = "Username"
+        elif "@" in self.account[0]:
+            self.ctype = "Email"
+        else:
+            self.ctype = "Username"
 
+        # Build payload with auth intent
         payload = {
-            "ctype": self.ctype, "cvalue": self.account[0], "password": self.account[1],
-            "secureAuthenticationIntent": self.sai
+            "ctype": self.ctype, 
+            "cvalue": self.account[0], 
+            "password": self.account[1],
         }
+        
+        # Add secureAuthenticationIntent if available
+        if self.sai:
+            payload["secureAuthenticationIntent"] = self.sai
 
         resp = self.session.post("https://auth.roblox.com/v2/login", json=payload)
         csrf = resp.headers.get("x-csrf-token")
