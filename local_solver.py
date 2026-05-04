@@ -220,7 +220,7 @@ def get_token(session, metadata=None) -> Optional[str]:
     t.start()
     
     # Wait for result (longer timeout for local solver)
-    timeout = 180 if _config.get("use_local", True) else 120
+    timeout = 300 if _config.get("use_local", True) else 180  # 5 min for local
     completed = event.wait(timeout=timeout)
     
     if not completed:
@@ -340,8 +340,8 @@ def solve_captcha_wrapper(session) -> bool:
     t = threading.Thread(target=run_solver_task, daemon=True)
     t.start()
     
-    # Wait for result
-    timeout = 180 if _config.get("use_local", True) else 120
+    # Wait for result (5 minutes for local solver)
+    timeout = 300 if _config.get("use_local", True) else 180
     completed = event.wait(timeout=timeout)
     
     if not completed:
