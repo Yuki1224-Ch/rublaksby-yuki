@@ -12,7 +12,7 @@ from typing import Optional, Dict, Any
 
 # Import the local captcha solver
 try:
-    from custom_solver import LocalCaptchaSolver, CustomCaptchaSolver
+    from custom_solver import RealCaptchaSolver, LocalCaptchaSolver, CustomCaptchaSolver
     HAS_LOCAL_SOLVER = True
 except ImportError:
     HAS_LOCAL_SOLVER = False
@@ -87,7 +87,7 @@ def get_solver_instance():
         if thread_id not in _solver_instances:
             # Always prefer local solver (free)
             if HAS_LOCAL_SOLVER and _config.get("use_local", True):
-                _solver_instances[thread_id] = LocalCaptchaSolver(
+                _solver_instances[thread_id] = RealCaptchaSolver(
                     debug=_config.get("debug", False),
                     headless=_config.get("headless", True)
                 )
@@ -155,7 +155,7 @@ def get_token(session, metadata=None) -> Optional[str]:
             username = getattr(session, 'username', 'Unknown')
             
             # Local solver path
-            if HAS_LOCAL_SOLVER and isinstance(solver, LocalCaptchaSolver):
+            if HAS_LOCAL_SOLVER and isinstance(solver, RealCaptchaSolver):
                 print(f"[*] 🧩 Solving Captcha locally for {username}...")
                 
                 # Ensure browser is running
@@ -267,7 +267,7 @@ def solve_captcha_wrapper(session) -> bool:
             username = getattr(session, 'username', 'Unknown')
             
             # Local solver path (preferred)
-            if HAS_LOCAL_SOLVER and isinstance(solver, LocalCaptchaSolver):
+            if HAS_LOCAL_SOLVER and isinstance(solver, RealCaptchaSolver):
                 print(f"[*] 🧩 Solving Captcha locally for {username}...")
                 
                 # Ensure browser is running
