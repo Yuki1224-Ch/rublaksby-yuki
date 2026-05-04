@@ -135,87 +135,117 @@ class RobloxSession:
         except:
             return False
 
+    def get_csrf_token(self):
+        """Get X-CSRF token from Roblox - Simple API method"""
+        url = "https://auth.roblox.com/v1/login"
+        try:
+            response = self._session.post(url, timeout=30)
+            if 'x-csrf-token' in response.headers:
+                self.csrf_token = response.headers['x-csrf-token']
+                self._session.headers["x-csrf-token"] = self.csrf_token
+                return True
+            return False
+        except Exception as e:
+            print(f"[-] Error getting CSRF token: {str(e)}")
+            return False
+
     def login(self, username: str, password: str, sai: str = None) -> dict:
         """
-        Attempt to login with credentials.
-        Returns dict with status and any challenge info.
+        Simple API Login - Based on working checker.
+        Only switches to browser when captcha is detected.
         """
         # Store credentials for captcha solver
         self.username = username
         self.password = password
         
-        # Get initial cookies
-        self.get_initial_cookies()
+        # Get CSRF token first
+        if not self.csrf_token:
+            if not self.get_csrf_token():
+                return {"success": False, "error": "Failed to get CSRF token"}
         
-        # Get CSRF token
-        self._get_csrf()
-        if self.csrf_token:
-            self._session.headers["x-csrf-token"] = self.csrf_token
-        
-        # Determine ctype
-        ctype = "Email" if "@" in username else "Username"
-        
-        # Build payload
+        # Build payload - simple format like reference
         payload = {
-            "ctype": ctype,
+            "ctype": "Username",
             "cvalue": username,
-            "password": password,
+            "password": password
         }
         
         if sai:
             payload["secureAuthenticationIntent"] = sai
         
-        # Try login
-        resp = self._session.post("https://auth.roblox.com/v2/login", json=payload, timeout=15)
-        data = resp.json() if resp.text else {}
-        
-        # Handle CSRF retry
-        if resp.status_code == 403 and "CSRF" in resp.text:
-            csrf = resp.headers.get("x-csrf-token")
-            if csrf:
-                self._session.headers["x-csrf-token"] = csrf
-                resp = self._session.post("https://auth.roblox.com/v2/login", json=payload, timeout=15)
-                data = resp.json() if resp.text else {}
-        
-        result = {
-            "status_code": resp.status_code,
-            "data": data,
-            "success": False,
-            "needs_captcha": False,
-            "needs_2fa": False,
-            "challenge_id": None,
-            "challenge_metadata": None,
-        }
-        
-        if resp.status_code == 200 and "user" in data:
-            result["success"] = True
-            result["user_id"] = data["user"]["id"]
-            result["username"] = data["user"].get("username", username)
-            self.is_logged_in = True
-            self.user_id = result["user_id"]
-            self.username = result["username"]
-        elif "challengeId" in data:
-            result["needs_captcha"] = True
-            result["challenge_id"] = data["challengeId"]
-            result["challenge_metadata"] = data.get("challengeMetadata", "{}")
-            self.needs_captcha = True
-            self.captcha_blob = result["challenge_metadata"]
-        elif "twoStepVerification" in data:
-            result["needs_2fa"] = True
-        elif "errors" in data:
-            errors = data["errors"]
-            for err in errors:
-                code = err.get("code", -1)
-                if code == 0:
-                    # Check if it's captcha challenge
-                    if "Challenge" in err.get("message", ""):
-                        result["needs_captcha"] = True
-                    elif "users" in err.get("fieldData", ""):
-                        result["multi_factor"] = True
-                elif code in [17, 23, 24]:
-                    result["needs_2fa"] = True
-        
-        return result
+        try:
+            resp = self._session.post("https://auth.roblox.com/v1/login", json=payload, timeout=30)
+            data = resp.json() if resp.text else {}
+            
+            # Check for errors first (like reference code)
+            if "errors" in data:
+                for error in data["errors"]:
+                    code = error.get("code", -1)
+                    message = error.get("message", "")
+                    
+                    # Code 1 = Incorrect password
+                    if code == 1:
+                        return {"success": False, "error": "incorrect", "message": message}
+                    
+                    # Code 2 = Captcha required - switch to browser
+                    elif code == 2:
+                        self.needs_captcha = True
+                        return {"success": False, "needs_captcha": True, "message": "Captcha required"}
+                    
+                    # Code 0 = Challenge/Captcha
+                    elif code == 0:
+                        if "Challenge" in message or "challenge" in message.lower():
+                            self.needs_captcha = True
+                            return {"success": False, "needs_captcha": True, "message": message}
+                        elif "users" in error.get("fieldData", ""):
+                            # Multi-factor - need to select user
+                            return {"success": False, "multi_factor": True, "fieldData": error.get("fieldData")}
+                    
+                    # Other error codes
+                    elif code in [17, 23, 24]:
+                        return {"success": False, "needs_2fa": True, "message": message}
+                    
+                    else:
+                        return {"success": False, "error": "unknown", "message": message}
+            
+            # Success - user logged in
+            if "user" in data:
+                user_data = data["user"]
+                self.is_logged_in = True
+                self.user_id = user_data.get("id")
+                self.username = user_data.get("name", username)
+                
+                # Get the cookie
+                cookie = self._session.cookies.get(".ROBLOSECURITY", "")
+                
+                return {
+                    "success": True,
+                    "user_id": self.user_id,
+                    "username": self.username,
+                    "display_name": user_data.get("displayName", ""),
+                    "is_banned": user_data.get("isBanned", False),
+                    "cookie": cookie
+                }
+            
+            # Check for challenge ID (captcha)
+            if "challengeId" in data:
+                self.needs_captcha = True
+                self.captcha_blob = data.get("challengeMetadata", "{}")
+                return {
+                    "success": False, 
+                    "needs_captcha": True, 
+                    "challenge_id": data["challengeId"],
+                    "challenge_metadata": self.captcha_blob
+                }
+            
+            # 2FA
+            if "twoStepVerification" in data:
+                return {"success": False, "needs_2fa": True}
+            
+            return {"success": False, "error": "unknown", "message": "Unknown response"}
+            
+        except Exception as e:
+            return {"success": False, "error": "exception", "message": str(e)}
 
     def get_account_info(self):
         """Fetches Robux and other details for the logged-in user."""
