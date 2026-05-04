@@ -194,14 +194,54 @@ class Roblox:
             self._handle_2fa_challenge(data, payload)
             return
 
-        err = data.get("errors", [{}])[0]
-        code = err.get("code", -1)
-
-        if code == 1: self._invalid()
-        elif code == 4: self._locked()
-        elif code in (6, 7): self._banned(code == 6)
-        elif code == 0 and "users" in err.get("fieldData", ""):
-            self.handle_multi(err)
+        # Handle error response
+        # Check if error is in top-level ({"code": 0, "message": "..."})
+        # or in errors array ({"errors": [{"code": 1, ...}]})
+        if "errors" in data:
+            err = data["errors"][0] if data["errors"] else {}
+            code = err.get("code", -1)
+            msg = err.get("message", "")
+        else:
+            code = data.get("code", -1)
+            msg = data.get("message", "")
+            err = data
+        
+        # Rate limit
+        if resp.status_code == 429:
+            print(f"[LOGIN] ⚠️ Rate limited for {self.account[0]}")
+            return
+        
+        # Handle specific error codes
+        if code == 0:
+            # Code 0 can mean different things
+            if "Challenge" in msg or "challenge" in msg:
+                # Captcha required - start solver
+                print(f"[LOGIN] 🧩 Captcha required for {self.account[0]}")
+                token = get_token(self.session, "")
+                if token:
+                    # Retry login with captcha token
+                    payload["captchaToken"] = token
+                    resp = self.session.post("https://auth.roblox.com/v2/login", json=payload)
+                    data = resp.json()
+                    if resp.status_code == 200:
+                        cookie = self.session.cookies.get(".ROBLOSECURITY")
+                        uid = data.get("user", {}).get("id")
+                        if cookie and uid:
+                            self.handle_valid({"userId": uid, "cookie": cookie})
+                        return
+                self._invalid()
+            elif "users" in err.get("fieldData", ""):
+                self.handle_multi(err)
+            else:
+                # Generic code 0 error
+                print(f"[LOGIN] ❌ Error for {self.account[0]}: {msg}")
+                self._invalid()
+        elif code == 1:
+            self._invalid()
+        elif code == 4:
+            self._locked()
+        elif code in (6, 7):
+            self._banned(code == 6)
 
     def _is_2fa_challenge(self, data: dict) -> bool:
         """Check if this is a 2FA challenge."""
