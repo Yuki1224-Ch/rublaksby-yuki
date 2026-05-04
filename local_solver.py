@@ -140,15 +140,15 @@ def get_token(session, metadata=None) -> Optional[str]:
                 _stats["failed"] += 1
                 return None
         
-        # Solve the captcha
-        # Pass credentials so solver can fill login form
+        # ADVANCED: Open captcha DIRECTLY - no login page needed!
+        # When API detects captcha, we go straight to FunCaptcha
+        print(f"[*] AI Mode: Opening captcha directly (no login page)...")
+
         result = solver.solve_with_token(
             site_key="476068BF-9607-4799-B53D-966BE98E2B81",
-            service_url="https://www.roblox.com/login",
-            blob=metadata,
+            blob=metadata,  # Pass the blob from API challenge
             timeout=180,
-            username=username,
-            password=password
+            use_direct=True  # Direct captcha URL - ADVANCED!
         )
         
         _stats["attempts"] += 1

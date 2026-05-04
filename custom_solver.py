@@ -139,6 +139,138 @@ class RealCaptchaSolver:
             self.log(f"Browser start failed: {e}")
             return False
     
+    def solve_direct(
+        self,
+        site_key: str = "476068BF-9607-4799-B53D-966BE98E2B81",
+        blob: str = None,
+        timeout: int = 180
+    ) -> Dict[str, Any]:
+        """
+        ADVANCED: Directly open FunCaptcha without login page.
+        
+        Opens the Arkose Labs captcha directly, solves it, returns token.
+        This is faster and more efficient - no need to load login page!
+        """
+        if not self.browser:
+            if not self.start_browser():
+                return {"success": False, "token": None}
+        
+        # Direct FunCaptcha URL - no login page needed!
+        captcha_url = f"https://client-api.arkoselabs.com/v2/1.5.5/html/fc-game-core.html"
+        params = f"?pk={site_key}&ar=1&api_url=https://client-api.arkoselabs.com/v2"
+        
+        if blob:
+            # URL encode the blob if present
+            import urllib.parse
+            params += f"&blob={urllib.parse.quote(blob)}"
+        
+        full_url = captcha_url + params
+        self.log(f"Opening captcha DIRECTLY: {full_url[:80]}...")
+        
+        try:
+            self.page.goto(full_url, timeout=30000)
+            self._human_delay(1, 2)
+            
+            # Wait for captcha iframe
+            iframe = self._find_captcha_iframe()
+            
+            if not iframe:
+                self.log("No captcha found - checking for direct captcha...")
+                # Maybe it's already loaded directly
+                return self._solve_direct_captcha(timeout)
+            
+            frame = iframe.content_frame()
+            if not frame:
+                return {"success": False, "token": None}
+            
+            # Solve the captcha
+            for attempt in range(10):
+                if self.debug:
+                    print(f"[*] Direct solve attempt {attempt + 1}/10")
+                
+                try:
+                    self._human_delay(0.5, 1)
+                    
+                    # Try rotation challenge
+                    if self._solve_rotation(frame, iframe):
+                        self._human_delay(1, 2)
+                        if self._check_success():
+                            token = self._get_token()
+                            if token:
+                                self.solved_count += 1
+                                print(f"[+] ✅ DIRECT SOLVE! (Attempt {attempt + 1})")
+                                return {"success": True, "token": token}
+                    
+                    # Try click challenge
+                    elif self._solve_clicks(frame):
+                        self._human_delay(1, 2)
+                        if self._check_success():
+                            token = self._get_token()
+                            if token:
+                                self.solved_count += 1
+                                print(f"[+] ✅ DIRECT SOLVE! (Click challenge)")
+                                return {"success": True, "token": token}
+                    
+                    self._refresh(frame)
+                    self._human_delay(1, 2)
+                    
+                except Exception as e:
+                    self.log(f"Error: {e}")
+            
+            self.failed_count += 1
+            return {"success": False, "token": None}
+            
+        except Exception as e:
+            self.log(f"Direct solve error: {e}")
+            return {"success": False, "token": None}
+    
+    def _solve_direct_captcha(self, timeout: int = 180) -> Dict[str, Any]:
+        """Solve captcha when loaded directly on the page."""
+        import time
+        start = time.time()
+        
+        while time.time() - start < timeout:
+            # Check if already solved
+            token = self._get_token()
+            if token:
+                self.solved_count += 1
+                print(f"[+] ✅ Captcha already solved!")
+                return {"success": True, "token": token}
+            
+            # Look for game elements
+            try:
+                # Try to find and interact with the game
+                game_frame = None
+                
+                # Check for game iframe
+                for selector in ['#game-core', 'iframe[id*="fc"]', '#fc-game-core']:
+                    try:
+                        el = self.page.query_selector(selector)
+                        if el:
+                            game_frame = el.content_frame()
+                            break
+                    except:
+                        pass
+                
+                if game_frame:
+                    # Try rotation
+                    slider = game_frame.query_selector('input[type="range"]')
+                    if slider:
+                        self._do_rotation(slider, 45 + (45 * (time.time() % 2)))
+                        self._human_delay(1, 2)
+                        
+                        if self._check_success():
+                            token = self._get_token()
+                            if token:
+                                return {"success": True, "token": token}
+                
+                self._human_delay(1, 2)
+                
+            except Exception as e:
+                self.log(f"Direct captcha error: {e}")
+        
+        return {"success": False, "token": None}
+
     def solve_with_token(
         self,
         site_key: str = None,
@@ -146,13 +278,30 @@ class RealCaptchaSolver:
         blob: str = None,
         timeout: int = 180,
         username: str = None,
-        password: str = None
+        password: str = None,
+        use_direct: bool = True
     ) -> Dict[str, Any]:
         """
-        Main solving function.
+        ADVANCED AI-LIKE CAPTCHA SOLVER
         
-        Opens the login page, fills credentials, detects captcha, solves it.
+        When captcha detected in API:
+        - Opens FunCaptcha DIRECTLY (no login page)
+        - Solves captcha puzzle
+        - Returns token to continue API login
+        
+        Much faster than loading login page!
         """
+        site_key = site_key or "476068BF-9607-4799-B53D-966BE98E2B81"
+        
+        # USE DIRECT CAPTCHA - NO LOGIN PAGE!
+        if use_direct:
+            self.log("🧠 AI MODE: Opening captcha DIRECTLY (no login page)")
+            return self.solve_direct(site_key=site_key, blob=blob, timeout=timeout)
+        
+        # Legacy fallback - goes to login page
+        if not self.browser:
+            if not self.start_browser():
+                return {"success": False, "token": None}
         
         if not self.browser:
             if not self.start_browser():
