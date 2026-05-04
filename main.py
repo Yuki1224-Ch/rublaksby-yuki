@@ -156,7 +156,7 @@ def main():
         # Start workers
         workers = []
         for i in range(threads):
-            roblox = Roblox(lock, counter, invalid, checked_file, locked, account_queue)
+            roblox = Roblox(lock, counter, invalid, checked_file, locked, account_queue, proxies)
             
             # Track valid
             original_valid = roblox.handle_valid

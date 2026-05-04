@@ -86,15 +86,24 @@ def replace_badge_names(text: str) -> str:
 
 class Roblox:
     def __init__(self, lock: ThreadLock, counter: Counter, invalid: ComboCheck,
-                 checked_file: ComboCheck, locked: ComboCheck, account_queue: queue.Queue):
+                 checked_file: ComboCheck, locked: ComboCheck, account_queue: queue.Queue,
+                 proxies: list = None):
         self.lock = lock
         self.counter = counter
         self.invalid = invalid
         self.checked_file = checked_file
         self.locked = locked
         self.account_queue = account_queue
-        self.session = Session.random_session()
+        self.proxies = proxies or []
         self.twofa_used = False  # Track if 2FA was used
+        
+        # Create session with random proxy
+        proxy = random.choice(self.proxies) if self.proxies else None
+        if proxy:
+            self.session = Session(proxy=proxy)
+            print(f"[PROXY] Using proxy for session")
+        else:
+            self.session = Session.random_session()
 
     def check(self):
         while True:
