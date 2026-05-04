@@ -227,18 +227,20 @@ def main():
     
     console.print("[bold blue]🚀 Starting Roblox Account Checker...[/bold blue]")
     
-    # Check for 2Captcha API key
-    api_key = config.get("captcha_api_key") or os.environ.get("CAPTCHA_API_KEY") or os.environ.get("TWOCAPTCHA_KEY")
+    # Configure captcha solver - LOCAL IS DEFAULT (FREE!)
+    api_key = config.get("captcha_api_key") or config.get("2captchaKey") or os.environ.get("CAPTCHA_API_KEY")
+    use_local = config.get("use_local_solver", True)  # Default to local (free)
     
-    if api_key:
-        console.print(f"[green]🔑 2Captcha API key found: {api_key[:10]}...[/green]")
-        configure(api_key=api_key, debug=config.get("debug", False))
+    console.print("[bold green]🧩 Using LOCAL Captcha Solver (FREE)[/bold green]")
+    
+    if api_key and not use_local:
+        console.print(f"[cyan]🔑 API fallback available: {api_key[:10]}...[/cyan]")
+        configure(api_key=api_key, debug=config.get("debug", False), use_local=False)
+    elif api_key:
+        console.print(f"[cyan]🔑 API key configured as fallback: {api_key[:10]}...[/cyan]")
+        configure(api_key=api_key, debug=config.get("debug", False), use_local=True)
     else:
-        console.print("[yellow]⚠️ No 2Captcha API key found![/yellow]")
-        console.print("[yellow]   Captcha solving may not work reliably.[/yellow]")
-        console.print("[yellow]   Add 'captcha_api_key' to config.json or set CAPTCHA_API_KEY env var[/yellow]")
-        console.print("[yellow]   Get your API key at: https://2captcha.com[/yellow]")
-        configure(debug=config.get("debug", False))
+        configure(debug=config.get("debug", False), use_local=True)
     
     accounts = load_accounts("accounts.txt")
     proxies = load_proxies("proxies.txt")

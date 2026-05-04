@@ -1,10 +1,12 @@
 {
     "threads": 2,
     "useCustomSolver": true,
+    "use_local_solver": true,
     "2captchaKey": "",
     "captcha_api_key": "",
     "captcha_timeout": 180,
     "debug": false,
+    "headless": true,
     "skipCombos": {
         "skip_invalid": true,
         "skip_checked": true

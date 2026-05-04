@@ -1,34 +1,29 @@
 """
 Local Solver Integration Module.
-Bridges the gap between the session and the real captcha solver.
-Supports both 2Captcha API and local fallback methods.
+Bridges the gap between the session and the captcha solver.
+Prioritizes local solving (free) over API services.
 """
 import threading
 import time
 import signal
 import sys
+import os
 from typing import Optional, Dict, Any
 
-# Import the real captcha solver
+# Import the local captcha solver
 try:
-    from captcha_solver import (
-        CaptchaSolver, 
-        LocalCaptchaSolver, 
-        SolverManager,
-        get_solver_manager,
-        configure_solver
-    )
-    HAS_CAPTCHA_SOLVER = True
+    from custom_solver import LocalCaptchaSolver, CustomCaptchaSolver
+    HAS_LOCAL_SOLVER = True
 except ImportError:
-    HAS_CAPTCHA_SOLVER = False
-    print("[!] captcha_solver.py not found, using legacy solver")
+    HAS_LOCAL_SOLVER = False
+    print("[!] custom_solver.py not found!")
 
-# Legacy import for backwards compatibility
+# Import API solver (optional, for users who want it)
 try:
-    from custom_solver import CustomCaptchaSolver
-    HAS_CUSTOM_SOLVER = True
+    from captcha_solver import CaptchaSolver
+    HAS_API_SOLVER = True
 except ImportError:
-    HAS_CUSTOM_SOLVER = False
+    HAS_API_SOLVER = False
 
 # Global state
 _solver_instances = {}
@@ -37,29 +32,32 @@ _shutdown_event = threading.Event()
 _config = {
     "api_key": None,
     "debug": False,
-    "use_api": True  # Prefer API over local
+    "use_local": True,  # Default to local solver (free)
+    "headless": True
 }
 
 
-def configure(api_key: str = None, debug: bool = False, use_api: bool = True):
+def configure(api_key: str = None, debug: bool = False, use_local: bool = True, headless: bool = True):
     """
     Configure the captcha solver.
     
     Args:
-        api_key: 2Captcha API key for reliable solving
+        api_key: Optional 2Captcha API key for fallback
         debug: Enable debug logging
-        use_api: Prefer API solving over local methods
+        use_local: Use local solver (default True - free)
+        headless: Run browser in headless mode
     """
     global _config
     _config = {
         "api_key": api_key,
         "debug": debug,
-        "use_api": use_api
+        "use_local": use_local,
+        "headless": headless
     }
     
-    if HAS_CAPTCHA_SOLVER and api_key:
-        configure_solver(api_key=api_key, debug=debug)
-        print(f"[+] Captcha solver configured with API key")
+    if debug:
+        mode = "LOCAL (FREE)" if use_local else "API"
+        print(f"[+] Captcha solver configured: {mode} mode")
 
 
 def is_shutdown() -> bool:
@@ -87,13 +85,17 @@ def get_solver_instance():
     
     with _solver_lock:
         if thread_id not in _solver_instances:
-            # Prefer API solver if configured
-            if HAS_CAPTCHA_SOLVER and _config.get("api_key"):
-                manager = get_solver_manager()
-                _solver_instances[thread_id] = manager
-            elif HAS_CUSTOM_SOLVER:
-                # Legacy fallback
-                _solver_instances[thread_id] = CustomCaptchaSolver(debug=_config.get("debug", False))
+            # Always prefer local solver (free)
+            if HAS_LOCAL_SOLVER and _config.get("use_local", True):
+                _solver_instances[thread_id] = LocalCaptchaSolver(
+                    debug=_config.get("debug", False),
+                    headless=_config.get("headless", True)
+                )
+            elif HAS_API_SOLVER and _config.get("api_key"):
+                _solver_instances[thread_id] = CaptchaSolver(
+                    api_key=_config["api_key"],
+                    debug=_config.get("debug", False)
+                )
             else:
                 print("[-] No captcha solver available!")
                 return None
@@ -142,27 +144,51 @@ def get_token(session, metadata=None) -> Optional[str]:
             return
             
         try:
-            # Get solver based on configuration
-            if HAS_CAPTCHA_SOLVER and _config.get("api_key"):
-                # Use API solver
-                solver = CaptchaSolver(api_key=_config["api_key"], debug=_config.get("debug", False))
+            solver = get_solver_instance()
+            if not solver:
+                event.set()
+                return
+            
+            site_key = getattr(session, 'captcha_site_key', "476068BF-9607-4799-B53D-966BE98E2B81")
+            url = getattr(session, 'url', 'https://www.roblox.com/login')
+            blob = getattr(session, 'captcha_blob', None) or metadata
+            username = getattr(session, 'username', 'Unknown')
+            
+            # Local solver path
+            if HAS_LOCAL_SOLVER and isinstance(solver, LocalCaptchaSolver):
+                print(f"[*] 🧩 Solving Captcha locally for {username}...")
                 
-                site_key = getattr(session, 'captcha_site_key', "476068BF-9607-4799-B53D-966BE98E2B81")
-                url = getattr(session, 'url', 'https://www.roblox.com/login')
-                blob = getattr(session, 'captcha_blob', None) or metadata
+                # Ensure browser is running
+                if not solver.browser:
+                    proxy = getattr(session, 'proxy_dict', None)
+                    if not solver.start_browser(proxy):
+                        print(f"[-] Failed to start browser for {username}")
+                        event.set()
+                        return
                 
-                username = getattr(session, 'username', 'Unknown')
-                print(f"[*] 🧠 Solving Captcha for {username} via 2Captcha API...")
+                result = solver.solve_with_token(site_key, url, blob)
+                
+                if result.get('success'):
+                    result_container['success'] = True
+                    result_container['token'] = result.get('token')
+                    if result.get('token'):
+                        print(f"[+] ✅ Captcha solved! Token: {result['token'][:30]}...")
+                else:
+                    print(f"[-] ❌ Local solver failed for {username}")
+            
+            # API solver path (fallback)
+            elif HAS_API_SOLVER and hasattr(solver, 'solve_funcaptcha'):
+                print(f"[*] 🌐 Solving Captcha via API for {username}...")
                 
                 # Format proxy if available
                 proxy = None
                 proxy_dict = getattr(session, 'proxy_dict', None)
                 if proxy_dict:
+                    import re
                     server = proxy_dict.get('server', '')
                     user = proxy_dict.get('username')
                     pwd = proxy_dict.get('password')
                     if server:
-                        import re
                         match = re.search(r'://([^:]+):(\d+)', server)
                         if match:
                             ip, port = match.groups()
@@ -181,51 +207,24 @@ def get_token(session, metadata=None) -> Optional[str]:
                 if token:
                     result_container['success'] = True
                     result_container['token'] = token
+                    print(f"[+] ✅ API Captcha solved!")
                 else:
                     print(f"[-] ❌ API solver failed for {username}")
                     
-            else:
-                # Use legacy solver
-                solver = get_solver_instance()
-                if not solver:
-                    return
-                    
-                if not hasattr(solver, 'browser') or not solver.browser:
-                    proxy = getattr(session, 'proxy_dict', None)
-                    if hasattr(solver, 'start_browser'):
-                        if not solver.start_browser(proxy):
-                            print("[-] Failed to start browser for solver")
-                            return
-
-                url = getattr(session, 'url', 'https://www.roblox.com/login')
-                blob = getattr(session, 'captcha_blob', None) or metadata
-                site_key = getattr(session, 'captcha_site_key', "476068BF-9607-4799-B53D-966BE98E2B81")
-                
-                username = getattr(session, 'username', 'Unknown')
-                print(f"[*] 🔄 Solving Captcha for {username} via browser...")
-                
-                res = solver.solve_with_token(site_key, url, blob)
-                
-                if res.get('success'):
-                    result_container['success'] = True
-                    result_container['token'] = res.get('token')
-                else:
-                    print(f"[-] ❌ Browser solver failed for {username}")
-                    
         except Exception as e:
-            print(f"[-] 💥 Solver Thread Crash: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"[-] 💥 Solver error: {e}")
         finally:
             event.set()
 
     t = threading.Thread(target=run_solver_task, daemon=True)
     t.start()
     
-    completed = event.wait(timeout=180)  # 3 minutes for API solver
+    # Wait for result (longer timeout for local solver)
+    timeout = 180 if _config.get("use_local", True) else 120
+    completed = event.wait(timeout=timeout)
     
     if not completed:
-        print("[-] ⏱️ Captcha Solver Timed Out (180s)")
+        print(f"[-] ⏱️ Captcha Solver Timed Out ({timeout}s)")
         return None
         
     return result_container['token'] if result_container['success'] else None
@@ -257,27 +256,56 @@ def solve_captcha_wrapper(session) -> bool:
             return
             
         try:
-            # Get solver based on configuration
-            if HAS_CAPTCHA_SOLVER and _config.get("api_key"):
-                # Use API solver
-                solver = CaptchaSolver(api_key=_config["api_key"], debug=_config.get("debug", False))
+            solver = get_solver_instance()
+            if not solver:
+                event.set()
+                return
+            
+            site_key = getattr(session, 'captcha_site_key', "476068BF-9607-4799-B53D-966BE98E2B81")
+            url = getattr(session, 'url', 'https://www.roblox.com/login')
+            blob = getattr(session, 'captcha_blob', None)
+            username = getattr(session, 'username', 'Unknown')
+            
+            # Local solver path (preferred)
+            if HAS_LOCAL_SOLVER and isinstance(solver, LocalCaptchaSolver):
+                print(f"[*] 🧩 Solving Captcha locally for {username}...")
                 
-                site_key = getattr(session, 'captcha_site_key', "476068BF-9607-4799-B53D-966BE98E2B81")
-                url = getattr(session, 'url', 'https://www.roblox.com/login')
-                blob = getattr(session, 'captcha_blob', None)
+                # Ensure browser is running
+                if not solver.browser:
+                    proxy = getattr(session, 'proxy_dict', None)
+                    if not solver.start_browser(proxy):
+                        print(f"[-] Failed to start browser for {username}")
+                        event.set()
+                        return
                 
-                username = getattr(session, 'username', 'Unknown')
-                print(f"[*] 🧠 Solving Captcha for {username} via 2Captcha API...")
+                result = solver.solve_with_token(site_key, url, blob)
+                
+                if result.get('success'):
+                    result_container['success'] = True
+                    result_container['token'] = result.get('token')
+                    
+                    if hasattr(session, 'set_captcha_token') and result.get('token'):
+                        session.set_captcha_token(result['token'])
+                        preview = result['token'][:20] if len(result['token']) > 20 else result['token']
+                        print(f"[+] ✅ Captcha Solved! Token: {preview}...")
+                    else:
+                        print(f"[+] ✅ Captcha Solved! (visual success)")
+                else:
+                    print(f"[-] ❌ Local solver failed for {username}")
+            
+            # API solver path (fallback)
+            elif HAS_API_SOLVER and hasattr(solver, 'solve_funcaptcha'):
+                print(f"[*] 🌐 Solving Captcha via API for {username}...")
                 
                 # Format proxy if available
                 proxy = None
                 proxy_dict = getattr(session, 'proxy_dict', None)
                 if proxy_dict:
+                    import re
                     server = proxy_dict.get('server', '')
                     user = proxy_dict.get('username')
                     pwd = proxy_dict.get('password')
                     if server:
-                        import re
                         match = re.search(r'://([^:]+):(\d+)', server)
                         if match:
                             ip, port = match.groups()
@@ -304,49 +332,20 @@ def solve_captcha_wrapper(session) -> bool:
                 else:
                     print(f"[-] ❌ API solver failed for {username}")
                     
-            else:
-                # Use legacy solver
-                solver = get_solver_instance()
-                if not solver:
-                    return
-                    
-                if hasattr(solver, 'browser') and (not solver.browser):
-                    proxy = getattr(session, 'proxy_dict', None)
-                    if hasattr(solver, 'start_browser'):
-                        if not solver.start_browser(proxy):
-                            print("[-] Failed to start browser for solver")
-                            return
-
-                url = getattr(session, 'url', 'https://www.roblox.com/login')
-                blob = getattr(session, 'captcha_blob', None)
-                site_key = getattr(session, 'captcha_site_key', "476068BF-9607-4799-B53D-966BE98E2B81")
-                
-                username = getattr(session, 'username', 'Unknown')
-                print(f"[*] 🔄 Solving Captcha for {username} via browser...")
-                
-                res = solver.solve_with_token(site_key, url, blob)
-                
-                if res.get('success'):
-                    result_container['success'] = True
-                    result_container['token'] = res.get('token')
-                    
-                    if hasattr(session, 'set_captcha_token'):
-                        session.set_captcha_token(result_container['token'])
-                else:
-                    print(f"[-] ❌ Browser solver failed for {username}")
-                    
         except Exception as e:
-            print(f"[-] 💥 Solver Thread Crash: {e}")
+            print(f"[-] 💥 Solver error: {e}")
         finally:
             event.set()
 
     t = threading.Thread(target=run_solver_task, daemon=True)
     t.start()
     
-    completed = event.wait(timeout=180)  # 3 minutes for API solver
+    # Wait for result
+    timeout = 180 if _config.get("use_local", True) else 120
+    completed = event.wait(timeout=timeout)
     
     if not completed:
-        print("[-] ⏱️ Captcha Solver Timed Out (180s)")
+        print(f"[-] ⏱️ Captcha Solver Timed Out ({timeout}s)")
         return False
         
     return result_container['success']
@@ -364,8 +363,6 @@ def cleanup_solver():
                 if hasattr(solver, 'close'):
                     print(f"[*] Closing solver for thread {thread_id}...")
                     solver.close()
-                elif hasattr(solver, 'cleanup'):
-                    solver.cleanup()
             except Exception as e:
                 print(f"[!] Error closing solver: {e}")
         _solver_instances.clear()
