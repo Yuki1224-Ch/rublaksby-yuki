@@ -47,34 +47,59 @@ class RobloxSession:
         self.captcha_blob = None
         self.captcha_site_key = "476068BF-9607-4799-B53D-966BE98E2B81" # Standard Roblox Arkose Key
 
-    def _get_csrf(self):
-        """Fetches a fresh CSRF token from Roblox."""
-        try:
-            # Primary method: Get from auth metadata endpoint
-            resp = self.session.get("https://auth.roblox.com/v2/captcha-metadata", timeout=10)
-            token = resp.headers.get('x-csrf-token')
-            if token and len(token) > 10:
-                self.csrf_token = token
-                return True
-            
-            # Fallback: Try the login page
-            resp = self.session.get("https://www.roblox.com/login", timeout=10)
-            token = resp.headers.get('x-csrf-token')
-            if token and len(token) > 10:
-                self.csrf_token = token
-                return True
+    def _get_csrf(self, max_retries=2):
+        """Fetches a fresh CSRF token from Roblox with multiple endpoint fallbacks."""
+        attempt = 0
+        while attempt < max_retries:
+            try:
+                # Method 1: Get from auth metadata endpoint (most reliable for captcha scenarios)
+                resp = self.session.get("https://auth.roblox.com/v2/captcha-metadata", timeout=10)
+                token = resp.headers.get('x-csrf-token')
+                if token and len(token) > 10:
+                    self.csrf_token = token
+                    return True
                 
-            # Last resort: Try POST to trigger CSRF header
-            resp = self.session.post("https://auth.roblox.com/v2/login", json={})
-            token = resp.headers.get('x-csrf-token')
-            if token and len(token) > 10:
-                self.csrf_token = token
-                return True
+                # Method 2: Try the login page with proper headers
+                headers = {
+                    "User-Agent": self.session.headers.get("User-Agent", "Mozilla/5.0"),
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language": "en-US,en;q=0.9",
+                }
+                resp = self.session.get("https://www.roblox.com/login", headers=headers, timeout=10)
+                token = resp.headers.get('x-csrf-token')
+                if token and len(token) > 10:
+                    self.csrf_token = token
+                    return True
+                    
+                # Method 3: Try POST to /v2/login with empty body to trigger CSRF header
+                resp = self.session.post("https://auth.roblox.com/v2/login", json={}, timeout=10)
+                token = resp.headers.get('x-csrf-token')
+                if token and len(token) > 10:
+                    self.csrf_token = token
+                    return True
                 
-            return False
-        except Exception as e:
-            # print(f"[!] CSRF Error: {e}")
-            return False
+                # Method 4: Try the signup page (sometimes provides CSRF)
+                resp = self.session.get("https://www.roblox.com/signup", timeout=10)
+                token = resp.headers.get('x-csrf-token')
+                if token and len(token) > 10:
+                    self.csrf_token = token
+                    return True
+                    
+            except requests.exceptions.Timeout:
+                attempt += 1
+                time.sleep(0.5 * attempt)  # Exponential backoff
+                continue
+            except requests.exceptions.RequestException:
+                attempt += 1
+                time.sleep(0.5 * attempt)
+                continue
+            except Exception as e:
+                attempt += 1
+                time.sleep(0.5 * attempt)
+                continue
+        
+        # All methods and retries failed
+        return False
 
     def login(self, username, password):
         """Attempts to log in to Roblox with improved API handling."""
@@ -231,8 +256,22 @@ class RobloxSession:
             if password:
                 print(f"   🔄 Retrying login for {self.username}...")
                 
-                # Re-get CSRF token
-                self._get_csrf()
+                # Re-get CSRF token with multiple retries - critical for captcha retry
+                csrf_attempts = 0
+                max_csrf_attempts = 3
+                while csrf_attempts < max_csrf_attempts:
+                    if self._get_csrf():
+                        break
+                    csrf_attempts += 1
+                    if csrf_attempts < max_csrf_attempts:
+                        print(f"   🔄 CSRF attempt {csrf_attempts}/{max_csrf_attempts} failed, retrying...")
+                        time.sleep(1)
+                
+                if not self.csrf_token or len(self.csrf_token) < 10:
+                    print(f"   ❌ Failed to obtain valid CSRF token for {self.username} after {max_csrf_attempts} attempts")
+                    return False
+                
+                print(f"   ✅ Got CSRF token for retry")
                 
                 login_data = {
                     "ctype": "username",
@@ -294,7 +333,21 @@ class RobloxSession:
                     # If no specific error but still failed, try one more time with fresh CSRF
                     print(f"   [yellow]Login failed, trying once more with fresh token...[/yellow]")
                     time.sleep(1)
-                    self._get_csrf()
+                    
+                    # Get fresh CSRF with retries for the second attempt
+                    csrf_retry_attempts = 0
+                    max_csrf_retries = 2
+                    while csrf_retry_attempts < max_csrf_retries:
+                        if self._get_csrf():
+                            break
+                        csrf_retry_attempts += 1
+                        if csrf_retry_attempts < max_csrf_retries:
+                            time.sleep(0.5)
+                    
+                    if not self.csrf_token or len(self.csrf_token) < 10:
+                        print(f"   ❌ Failed to obtain CSRF token for final retry")
+                        return False
+                        
                     headers["x-csrf-token"] = self.csrf_token
                     
                     resp2 = self.session.post(

@@ -78,7 +78,24 @@ def check_account_task(account_line, proxy_dict):
         
         if not login_success:
             if session.needs_captcha:
+                # Always get a fresh CSRF token before attempting captcha solve
                 add_log(f"⚡ Captcha detected for {username}...", "yellow")
+                
+                # Try to get a fresh CSRF token - this is critical for captcha solving
+                if not session._get_csrf():
+                    time.sleep(0.5)
+                    if not session._get_csrf():
+                        add_log(f"❌ Failed to obtain CSRF token for {username} (captcha blocked)", "red")
+                        update_stats("errors")
+                        return
+                
+                # Verify we have a valid CSRF token
+                if not session.csrf_token or len(session.csrf_token) < 10:
+                    add_log(f"❌ Invalid CSRF token for {username}", "red")
+                    update_stats("errors")
+                    return
+                    
+                add_log(f"🔄 CSRF token obtained for {username}, solving captcha...", "cyan")
                 
                 # Use solve_captcha_and_retry with password parameter
                 solved = session.solve_captcha_and_retry(
