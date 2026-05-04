@@ -121,6 +121,7 @@ def get_token(session, metadata=None) -> Optional[str]:
         return None
     
     username = getattr(session, 'username', 'Unknown')
+    password = getattr(session, 'password', None)
     proxy_dict = getattr(session, 'proxy_dict', None)
     
     print(f"[*] 🧩 Solving captcha for {username} (FREE!)...")
@@ -140,12 +141,14 @@ def get_token(session, metadata=None) -> Optional[str]:
                 return None
         
         # Solve the captcha
-        # The solver navigates to login page and solves the captcha there
+        # Pass credentials so solver can fill login form
         result = solver.solve_with_token(
             site_key="476068BF-9607-4799-B53D-966BE98E2B81",
             service_url="https://www.roblox.com/login",
             blob=metadata,
-            timeout=180
+            timeout=180,
+            username=username,
+            password=password
         )
         
         _stats["attempts"] += 1

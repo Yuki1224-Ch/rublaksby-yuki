@@ -69,6 +69,7 @@ class RobloxSession:
         self.auth_ticket = None
         self.user_id = None
         self.username = None
+        self.password = None  # Store password for captcha solver
         self.is_logged_in = False
         self.needs_captcha = False
         self.captcha_blob = None
@@ -139,6 +140,10 @@ class RobloxSession:
         Attempt to login with credentials.
         Returns dict with status and any challenge info.
         """
+        # Store credentials for captcha solver
+        self.username = username
+        self.password = password
+        
         # Get initial cookies
         self.get_initial_cookies()
         

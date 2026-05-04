@@ -144,12 +144,14 @@ class RealCaptchaSolver:
         site_key: str = None,
         service_url: str = "https://www.roblox.com/login",
         blob: str = None,
-        timeout: int = 180
+        timeout: int = 180,
+        username: str = None,
+        password: str = None
     ) -> Dict[str, Any]:
         """
         Main solving function.
         
-        Opens the login page, detects captcha, solves it.
+        Opens the login page, fills credentials, detects captcha, solves it.
         """
         
         if not self.browser:
@@ -162,6 +164,11 @@ class RealCaptchaSolver:
             # Navigate to login page
             self.page.goto(service_url, timeout=30000)
             self._human_delay(1, 2)
+            
+            # Fill in login credentials if provided
+            if username and password:
+                self.log(f"Filling credentials for {username}")
+                self._fill_login_form(username, password)
             
             # Wait for page load
             try:
@@ -231,6 +238,83 @@ class RealCaptchaSolver:
         print(f"[-] ❌ Failed after 10 attempts")
         return {"success": False, "token": None}
     
+
+    def _fill_login_form(self, username: str, password: str):
+        """Fill in the Roblox login form with credentials."""
+        try:
+            # Wait for page to be ready
+            self.page.wait_for_load_state("domcontentloaded", timeout=10000)
+            self._human_delay(0.5, 1)
+            
+            # Find and fill username field
+            username_selectors = [
+                '#login-username',
+                'input[name="username"]',
+                'input[placeholder*="Username"]',
+                'input[type="text"]',
+                '#username',
+                'input[id*="username"]'
+            ]
+            
+            username_filled = False
+            for selector in username_selectors:
+                try:
+                    el = self.page.wait_for_selector(selector, timeout=3000)
+                    if el and el.is_visible():
+                        el.click()
+                        self._human_delay(0.1, 0.2)
+                        el.fill("")
+                        self._human_delay(0.1, 0.2)
+                        el.type(username, delay=50 + int(50 * (time.time() % 1)))
+                        self.log(f"Filled username using {selector}")
+                        username_filled = True
+                        break
+                except:
+                    continue
+            
+            if not username_filled:
+                self.log("Could not find username field")
+                return False
+            
+            self._human_delay(0.3, 0.5)
+            
+            # Find and fill password field
+            password_selectors = [
+                '#login-password',
+                'input[name="password"]',
+                'input[placeholder*="Password"]',
+                'input[type="password"]',
+                '#password',
+                'input[id*="password"]'
+            ]
+            
+            password_filled = False
+            for selector in password_selectors:
+                try:
+                    el = self.page.wait_for_selector(selector, timeout=3000)
+                    if el and el.is_visible():
+                        el.click()
+                        self._human_delay(0.1, 0.2)
+                        el.fill("")
+                        self._human_delay(0.1, 0.2)
+                        el.type(password, delay=30 + int(30 * (time.time() % 1)))
+                        self.log(f"Filled password using {selector}")
+                        password_filled = True
+                        break
+                except:
+                    continue
+            
+            if not password_filled:
+                self.log("Could not find password field")
+                return False
+            
+            self.log(f"Login form filled for {username}")
+            return True
+            
+        except Exception as e:
+            self.log(f"Error filling login form: {e}")
+            return False
+
     def _find_captcha_iframe(self):
         """Find the captcha iframe."""
         selectors = [
