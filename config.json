@@ -2,6 +2,8 @@
     "threads": 2,
     "useCustomSolver": true,
     "2captchaKey": "",
+    "captcha_api_key": "",
+    "captcha_timeout": 180,
     "debug": false,
     "skipCombos": {
         "skip_invalid": true,
