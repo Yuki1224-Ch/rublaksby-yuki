@@ -4,7 +4,7 @@
     "use_local_solver": true,
     "2captchaKey": "",
     "captcha_api_key": "",
-    "captcha_timeout": 180,
+    "captcha_timeout": 300,
     "debug": false,
     "headless": true,
     "skipCombos": {
@@ -18,5 +18,11 @@
         }
     },
     "logWebhook": false,
-    "webhooks": {}
+    "webhooks": {},
+    "2fa": {
+        "enabled": true,
+        "use_inline_secrets": true,
+        "use_2fa_file": true,
+        "save_2fa_verified": true
+    }
 }

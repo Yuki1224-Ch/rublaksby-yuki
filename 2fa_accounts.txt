@@ -1,0 +1,30 @@
+# 2FA Accounts File for Roblox Checker
+# ==========================================
+# 
+# Format: username:secret_key:backup_codes
+#
+# - username: Roblox username (case-insensitive)
+# - secret_key: TOTP secret key (from authenticator app setup)
+# - backup_codes: Comma-separated list of backup codes (optional)
+#
+# Examples:
+#
+# Single account with just TOTP:
+# myusername:JBSWY3DPEHPK3PXP
+#
+# Account with TOTP and backup codes:
+# myusername:JBSWY3DPEHPK3PXP:123456,789012,345678
+#
+# Account with only backup codes (no TOTP secret):
+# myusername::123456,789012
+#
+# How to get your TOTP secret:
+# 1. Go to Roblox Settings -> Security
+# 2. Enable 2-Step Verification
+# 3. Choose "Authenticator App"
+# 4. When shown the QR code, look for the "manual entry" option
+# 5. The secret key is shown there (usually 16-32 characters)
+#
+# IMPORTANT: Keep this file secure! Anyone with these secrets
+# can generate 2FA codes for your accounts.
+#
