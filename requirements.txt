@@ -3,6 +3,7 @@ requests>=2.28.0
 curl_cffi>=0.5.0
 rich>=13.0.0
 colorama>=0.4.6
+cryptography>=41.0.0
 
 # Captcha solver (FREE local solver)
 playwright>=1.40.0
