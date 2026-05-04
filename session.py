@@ -9,9 +9,13 @@ from util import get_proxy_url, random_user_agent, parse_proxy
 
 class RobloxSession:
     def __init__(self, proxy=None):
-        self.session = requests.Session()
+        self._session = requests.Session()
         self.proxy_dict = None
         self.proxy_url = None
+        
+        # Expose session attributes directly for compatibility
+        self.headers = self._session.headers
+        self.cookies = self._session.cookies
         
         # Setup Proxy
         if proxy:
@@ -22,13 +26,13 @@ class RobloxSession:
                 self.proxy_dict = proxy
                 self.proxy_url = get_proxy_url(proxy)
                 # Configure requests session
-                self.session.proxies = {
+                self._session.proxies = {
                     "http": self.proxy_url,
                     "https": self.proxy_url
                 }
         
         # Setup Headers
-        self.session.headers.update({
+        self._session.headers.update({
             "User-Agent": random_user_agent(),
             "Accept": "application/json, text/plain, */*",
             "Accept-Language": "en-US,en;q=0.9",
@@ -46,6 +50,23 @@ class RobloxSession:
         self.needs_captcha = False
         self.captcha_blob = None
         self.captcha_site_key = "476068BF-9607-4799-B53D-966BE98E2B81" # Standard Roblox Arkose Key
+    
+    # Proxy methods for HTTP requests (for compatibility with roblox.py)
+    def get(self, url, **kwargs):
+        """Make a GET request."""
+        return self._session.get(url, **kwargs)
+    
+    def post(self, url, **kwargs):
+        """Make a POST request."""
+        return self._session.post(url, **kwargs)
+    
+    def put(self, url, **kwargs):
+        """Make a PUT request."""
+        return self._session.put(url, **kwargs)
+    
+    def delete(self, url, **kwargs):
+        """Make a DELETE request."""
+        return self._session.delete(url, **kwargs)
 
     def _get_csrf(self, max_retries=2):
         """Fetches a fresh CSRF token from Roblox with multiple endpoint fallbacks."""
@@ -53,7 +74,7 @@ class RobloxSession:
         while attempt < max_retries:
             try:
                 # Method 1: Get from auth metadata endpoint (most reliable for captcha scenarios)
-                resp = self.session.get("https://auth.roblox.com/v2/captcha-metadata", timeout=10)
+                resp = self._session.get("https://auth.roblox.com/v2/captcha-metadata", timeout=10)
                 token = resp.headers.get('x-csrf-token')
                 if token and len(token) > 10:
                     self.csrf_token = token
@@ -61,25 +82,25 @@ class RobloxSession:
                 
                 # Method 2: Try the login page with proper headers
                 headers = {
-                    "User-Agent": self.session.headers.get("User-Agent", "Mozilla/5.0"),
+                    "User-Agent": self._session.headers.get("User-Agent", "Mozilla/5.0"),
                     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                     "Accept-Language": "en-US,en;q=0.9",
                 }
-                resp = self.session.get("https://www.roblox.com/login", headers=headers, timeout=10)
+                resp = self._session.get("https://www.roblox.com/login", headers=headers, timeout=10)
                 token = resp.headers.get('x-csrf-token')
                 if token and len(token) > 10:
                     self.csrf_token = token
                     return True
                     
                 # Method 3: Try POST to /v2/login with empty body to trigger CSRF header
-                resp = self.session.post("https://auth.roblox.com/v2/login", json={}, timeout=10)
+                resp = self._session.post("https://auth.roblox.com/v2/login", json={}, timeout=10)
                 token = resp.headers.get('x-csrf-token')
                 if token and len(token) > 10:
                     self.csrf_token = token
                     return True
                 
                 # Method 4: Try the signup page (sometimes provides CSRF)
-                resp = self.session.get("https://www.roblox.com/signup", timeout=10)
+                resp = self._session.get("https://www.roblox.com/signup", timeout=10)
                 token = resp.headers.get('x-csrf-token')
                 if token and len(token) > 10:
                     self.csrf_token = token
@@ -124,7 +145,7 @@ class RobloxSession:
             }
 
             # 3. Send Login Request with proper timeout
-            resp = self.session.post(
+            resp = self._session.post(
                 "https://auth.roblox.com/v2/login",
                 json=login_data,
                 headers=headers,
@@ -142,7 +163,7 @@ class RobloxSession:
                     
                     # Set Auth Cookie if present
                     if ".ROBLOSECURITY" in resp.cookies:
-                        self.session.cookies.set(".ROBLOSECURITY", resp.cookies[".ROBLOSECURITY"])
+                        self._session.cookies.set(".ROBLOSECURITY", resp.cookies[".ROBLOSECURITY"])
                     
                     return True
                 else:
@@ -247,7 +268,7 @@ class RobloxSession:
                 print(f"   ✅ Captcha visually solved! Retrying login...")
             elif token:
                 print(f"   ✅ Captcha Solved! Token: {token[:20]}...")
-                self.session.headers["x-captcha-token"] = token
+                self._session.headers["x-captcha-token"] = token
             
             # Reset captcha flag
             self.needs_captcha = False
@@ -286,10 +307,10 @@ class RobloxSession:
                 }
                 
                 # Add captcha token if we have one
-                if hasattr(self, 'session') and 'x-captcha-token' in self.session.headers:
-                    headers["x-captcha-token"] = self.session.headers['x-captcha-token']
+                if hasattr(self, 'session') and 'x-captcha-token' in self._session.headers:
+                    headers["x-captcha-token"] = self._session.headers['x-captcha-token']
                 
-                resp = self.session.post(
+                resp = self._session.post(
                     "https://auth.roblox.com/v2/login",
                     json=login_data,
                     headers=headers,
@@ -303,7 +324,7 @@ class RobloxSession:
                     self.user_id = data["user"]["id"]
                     
                     if ".ROBLOSECURITY" in resp.cookies:
-                        self.session.cookies.set(".ROBLOSECURITY", resp.cookies[".ROBLOSECURITY"])
+                        self._session.cookies.set(".ROBLOSECURITY", resp.cookies[".ROBLOSECURITY"])
                     
                     print(f"   ✅ Login successful after captcha solve!")
                     return True
@@ -350,7 +371,7 @@ class RobloxSession:
                         
                     headers["x-csrf-token"] = self.csrf_token
                     
-                    resp2 = self.session.post(
+                    resp2 = self._session.post(
                         "https://auth.roblox.com/v2/login",
                         json=login_data,
                         headers=headers,
@@ -363,7 +384,7 @@ class RobloxSession:
                         self.is_logged_in = True
                         self.user_id = data2["user"]["id"]
                         if ".ROBLOSECURITY" in resp2.cookies:
-                            self.session.cookies.set(".ROBLOSECURITY", resp2.cookies[".ROBLOSECURITY"])
+                            self._session.cookies.set(".ROBLOSECURITY", resp2.cookies[".ROBLOSECURITY"])
                         print(f"   [green]Login successful on retry![/green]")
                         return True
                     
@@ -385,7 +406,7 @@ class RobloxSession:
         
         try:
             # 1. Get Robux Balance
-            robux_resp = self.session.get(
+            robux_resp = self._session.get(
                 f"https://economy.roblox.com/v1/users/{self.user_id}/currency",
                 timeout=15
             )
@@ -398,7 +419,7 @@ class RobloxSession:
             # 2. Get Premium Status
             is_premium = False
             try:
-                premium_resp = self.session.get(
+                premium_resp = self._session.get(
                     f"https://premiumfeatures.roblox.com/v1/users/{self.user_id}/validate-membership",
                     timeout=15
                 )
@@ -409,7 +430,7 @@ class RobloxSession:
             
             # 3. Get Additional Info (optional)
             try:
-                info_resp = self.session.get(
+                info_resp = self._session.get(
                     f"https://users.roblox.com/v1/users/{self.user_id}",
                     timeout=15
                 )
@@ -434,7 +455,7 @@ class RobloxSession:
 
     def set_captcha_token(self, token):
         """Helper to manually set captcha token if solved externally."""
-        self.session.headers["x-captcha-token"] = token
+        self._session.headers["x-captcha-token"] = token
         self.needs_captcha = False
 
 # Alias for backwards compatibility with roblox.py
