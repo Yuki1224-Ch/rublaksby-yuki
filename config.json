@@ -1,13 +1,9 @@
 {
-    "threads": 2,
+    "threads": 1,
     "useCustomSolver": true,
-    "use_local_solver": false,
-    "use_api_solver": true,
-    "2captchaKey": "",
-    "captcha_api_key": "",
-    "captcha_timeout": 120,
-    "debug": false,
-    "headless": true,
+    "use_local_solver": true,
+    "debug": true,
+    "headless": false,
     "skipCombos": {
         "skip_invalid": true,
         "skip_checked": true
@@ -23,7 +19,6 @@
     "2fa": {
         "enabled": true,
         "use_inline_secrets": true,
-        "use_2fa_file": true,
-        "save_2fa_verified": true
+        "use_2fa_file": true
     }
 }

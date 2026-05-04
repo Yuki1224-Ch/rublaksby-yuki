@@ -1,10 +1,13 @@
 """
-Roblox Account Checker
-======================
+🚀 Roblox Account Checker with FREE Local Captcha Solver
+==========================================================
+💰 Cost: $0.00 - Completely FREE!
+🔑 No API key needed!
+
 Flow:
 1. Login with credentials
-2. If captcha detected → solve via API (fast)
-3. Continue and get account info
+2. If captcha detected → solve locally (FREE!)
+3. Get account info
 
 Keyboard Interrupt: Ctrl+C to stop gracefully
 """
@@ -16,10 +19,9 @@ import signal
 import queue
 
 from rich.console import Console
-from rich.live import Live
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, MofNCompleteColumn
-from rich.text import Text
+from rich.table import Table
 
 # Import modules
 from roblox import Roblox
@@ -39,26 +41,25 @@ from local_solver import (
 console = Console()
 config = get_config()
 
-# Global shutdown flag
+# Global shutdown
 _shutdown_requested = threading.Event()
 
-# Output directory
+# Create output directory
 os.makedirs("output", exist_ok=True)
 
 
 def signal_handler(sig, frame):
-    """Handle keyboard interrupt - Ctrl+C to stop."""
+    """Handle Ctrl+C - stop gracefully."""
     global _shutdown_requested
     
     if _shutdown_requested.is_set():
-        # Second Ctrl+C - force exit
         print("\n[!] Force quit!")
         os._exit(1)
     
     print("\n" + "="*50)
     print("⌨️  KEYBOARD INTERRUPT (Ctrl+C)")
     print("="*50)
-    print("[!] Stopping checker gracefully...")
+    print("[!] Stopping...")
     print("[*] Press Ctrl+C again to force quit")
     
     _shutdown_requested.set()
@@ -74,37 +75,35 @@ def main():
     _shutdown_requested.clear()
     clear_shutdown()
     
-    console.print("\n[bold blue]" + "="*50 + "[/bold blue]")
-    console.print("[bold blue]   🚀 Roblox Account Checker v4.0[/bold blue]")
-    console.print("[bold blue]" + "="*50 + "[/bold blue]")
+    # Banner
+    console.print("\n" + "="*60)
+    console.print("[bold blue]   🚀 Roblox Account Checker v5.0[/bold blue]")
+    console.print("[bold green]   💰 100% FREE - No API Key Needed![/bold green]")
+    console.print("="*60 + "\n")
     
-    # Configure captcha solver
-    api_key = config.get("captcha_api_key") or config.get("2captchaKey")
-    use_api = config.get("use_api_solver", True)
+    # Configure FREE local solver
     debug = config.get("debug", False)
+    headless = config.get("headless", True)
     
-    # Priority: API solver (most accurate)
-    if api_key:
-        console.print(f"[green]🔑 2Captcha API configured: {api_key[:10]}...[/green]")
-        configure(api_key=api_key, debug=debug, use_api=True, use_local=True)
-    else:
-        console.print("[yellow]⚠️ No API key - using local solver (free but slower)[/yellow]")
-        console.print("[cyan]💡 For best results, add your 2Captcha API key to config.json[/cyan]")
-        console.print("[cyan]   Get API key at: https://2captcha.com[/cyan]")
-        configure(debug=debug, use_api=False, use_local=True)
+    console.print("[green]🧩 Using FREE Local Captcha Solver[/green]")
+    console.print(f"[cyan]   Mode: {'HEADLESS' if headless else 'VISIBLE (you can watch)'}[/cyan]")
+    console.print("[cyan]   Cost: $0.00[/cyan]")
+    console.print("[cyan]   Press Ctrl+C to stop anytime[/cyan]\n")
+    
+    configure(debug=debug, headless=headless)
     
     # Load accounts
     accounts_file = "accounts.txt"
     if not os.path.exists(accounts_file):
-        console.print(f"[red]❌ No accounts.txt file found![/red]")
+        console.print("[red]❌ No accounts.txt file![/red]")
         console.print("[yellow]Create accounts.txt with format: username:password[/yellow]")
         return
     
     with open(accounts_file, 'r', encoding='utf-8') as f:
-        accounts = [line.strip() for line in f if ':' in line]
+        accounts = [line.strip() for line in f if ':' in line and not line.startswith('#')]
     
     if not accounts:
-        console.print("[red]❌ No accounts found in accounts.txt[/red]")
+        console.print("[red]❌ No accounts found[/red]")
         return
     
     # Load proxies
@@ -120,15 +119,15 @@ def main():
     if not proxies:
         console.print("[yellow]⚠️ No proxies - running without proxies[/yellow]")
     
-    threads = config.get("threads", 2)
+    threads = config.get("threads", 1)
     
     console.print(f"\n[green]📊 Loaded: {len(accounts)} accounts, {len(proxies)} proxies[/green]")
     console.print(f"[green]⚙️ Threads: {threads}[/green]")
-    console.print(f"[green]⌨️ Press Ctrl+C to stop[/green]\n")
+    console.print(f"[green]⌨️ Ctrl+C to stop[/green]\n")
     
     time.sleep(2)
     
-    # Setup tracking
+    # Setup queue and tracking
     account_queue = queue.Queue()
     for acc in accounts:
         account_queue.put(acc)
@@ -139,7 +138,11 @@ def main():
     checked_file = ComboCheck("output/checked.txt")
     locked = ComboCheck("output/locked.txt")
     
-    # Progress bar
+    # Stats
+    valid_count = [0]
+    stats_lock = threading.Lock()
+    
+    # Progress
     progress = Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -147,71 +150,63 @@ def main():
         MofNCompleteColumn(),
         expand=False
     )
-    task_id = progress.add_task("Checking Accounts...", total=len(accounts))
-    
-    # Stats
-    valid_count = [0]
-    captcha_solved = [0]
-    captcha_failed = [0]
-    stats_lock = threading.Lock()
-    
-    def update_progress():
-        with stats_lock:
-            progress.update(task_id, completed=counter.value)
+    task_id = progress.add_task("Checking...", total=len(accounts))
     
     try:
-        # Start worker threads
+        # Start workers
         workers = []
         for i in range(threads):
             roblox = Roblox(lock, counter, invalid, checked_file, locked, account_queue)
             
-            # Store valid count reference
-            original_handle_valid = roblox.handle_valid
-            def patched_handle_valid(self, *args, **kwargs):
-                with stats_lock:
-                    valid_count[0] += 1
-                return original_handle_valid(*args, **kwargs)
-            
-            # Monkey patch for stats
-            roblox.handle_valid = lambda *a, **k: patched_handle_valid(roblox, *a, **k)
+            # Track valid
+            original_valid = roblox.handle_valid
+            def make_valid_handler(r):
+                def handler(*args, **kwargs):
+                    with stats_lock:
+                        valid_count[0] += 1
+                    return original_valid(*args, **kwargs)
+                return handler
+            roblox.handle_valid = make_valid_handler(roblox)
             
             t = threading.Thread(target=roblox.check, daemon=True)
             t.start()
             workers.append(t)
         
-        # Live display
-        with Live(progress, refresh_per_second=4, screen=False):
+        # Update loop
+        with progress:
             while counter.value < len(accounts):
-                # Check for shutdown
                 if _shutdown_requested.is_set() or is_shutdown():
-                    console.print("\n[yellow]⏹️ Stopping remaining tasks...[/yellow]")
+                    console.print("\n[yellow]⏹️ Stopping...[/yellow]")
                     break
                 
-                update_progress()
+                progress.update(task_id, completed=counter.value)
                 time.sleep(0.25)
         
-        # Wait for workers to finish
+        # Wait for workers
         for t in workers:
             t.join(timeout=2)
         
     except KeyboardInterrupt:
-        console.print("\n[red]⏹️ Interrupted by user[/red]")
+        console.print("\n[red]⏹️ Interrupted[/red]")
     finally:
         cleanup_solver()
         
-        # Print final stats
+        # Stats
         solver_stats = get_stats()
         
-        console.print(f"\n[bold]" + "="*50 + "[/bold]")
+        console.print(f"\n[bold]" + "="*60 + "[/bold]")
         console.print("[bold]📊 FINAL STATISTICS[/bold]")
-        console.print("[bold]" + "="*50 + "[/bold]")
+        console.print("[bold]" + "="*60 + "[/bold]")
         
         with stats_lock:
             console.print(f"   [green]✅ Valid:[/green]       {valid_count[0]}")
             console.print(f"   [red]❌ Invalid:[/red]     {counter.value - valid_count[0]}")
-            console.print(f"   [yellow]🧩 Captcha Solved:[/yellow] {solver_stats.get('total_solved', 0)}")
-            console.print(f"   [red]🔓 Captcha Failed:[/red] {solver_stats.get('failed', 0)}")
-            console.print(f"   [cyan]📋 Total Checked:[/cyan] {counter.value}")
+            console.print(f"   [cyan]📋 Checked:[/cyan]    {counter.value}")
+        
+        console.print(f"\n   [yellow]🧩 Captcha:[/yellow]")
+        console.print(f"      ✅ Solved: {solver_stats.get('total_solved', 0)}")
+        console.print(f"      ❌ Failed: {solver_stats.get('failed', 0)}")
+        console.print(f"      💰 Cost:   $0.00 (FREE!)")
         
         console.print(f"\n[green]📁 Check 'output/' folder for results[/green]")
         console.print("[green]👋 Done![/green]")
