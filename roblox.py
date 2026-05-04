@@ -14,7 +14,15 @@ from auth_intent import AuthIntent
 from ip_intelligence import IpIntelligence
 from util import get_config, random_string
 from secure import Secure
-from discord_webhook import DiscordWebhook, DiscordEmbed
+
+# Discord webhook - optional
+try:
+    from discord_webhook import DiscordWebhook, DiscordEmbed
+    HAS_DISCORD_WEBHOOK = True
+except ImportError:
+    HAS_DISCORD_WEBHOOK = False
+    DiscordWebhook = None
+    DiscordEmbed = None
 
 # Import 2FA handler
 try:

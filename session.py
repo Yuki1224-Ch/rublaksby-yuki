@@ -439,3 +439,11 @@ class RobloxSession:
 
 # Alias for backwards compatibility with roblox.py
 Session = RobloxSession
+
+# Static method for random session creation (used by roblox.py)
+def random_session():
+    """Create a new session without proxy."""
+    return RobloxSession(proxy=None)
+
+# Add as class method
+RobloxSession.random_session = staticmethod(random_session)
