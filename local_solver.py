@@ -1,146 +1,257 @@
+"""
+100% FREE Local Captcha Solver for Roblox
+==========================================
+NO API KEY NEEDED! NO MONEY REQUIRED!
+
+This solver uses:
+1. Playwright browser automation (free)
+2. OpenCV image analysis (free)
+3. Smart rotation detection (free)
+
+Flow:
+1. roblox.py detects captcha during login
+2. Calls get_token() with challenge metadata
+3. Solver opens captcha in browser, solves it
+4. Returns token to continue login
+"""
 import threading
 import time
-from custom_solver import CustomCaptchaSolver
+import signal
+import sys
+import os
+import json
+from typing import Optional, Dict, Any
+from pathlib import Path
 
-# Global solver instances per-thread to avoid greenlet conflicts
+# Import local solver
+try:
+    from custom_solver import RealCaptchaSolver
+    HAS_LOCAL_SOLVER = True
+except ImportError:
+    HAS_LOCAL_SOLVER = False
+    print("[!] custom_solver.py not found!")
+
+# Global state
 _solver_instances = {}
 _solver_lock = threading.Lock()
+_shutdown_event = threading.Event()
+_config = {
+    "debug": False,
+    "headless": True,  # Set to False to watch it solve
+    "max_attempts": 10
+}
 
-def get_solver_instance():
-    """Get or create a solver instance for the current thread."""
+# Statistics
+_stats = {
+    "total_solved": 0,
+    "failed": 0,
+    "attempts": 0
+}
+
+
+def configure(debug: bool = False, headless: bool = True, **kwargs):
+    """Configure the FREE local captcha solver."""
+    global _config
+    _config = {
+        "debug": debug,
+        "headless": headless,
+        "max_attempts": kwargs.get("max_attempts", 10)
+    }
+    
+    mode = "HEADLESS" if headless else "VISIBLE"
+    print(f"[+] 🧩 FREE Local Captcha Solver configured ({mode} mode)")
+    print(f"[+] 💰 Cost: $0.00 - Completely FREE!")
+
+
+def is_shutdown() -> bool:
+    """Check if shutdown has been requested."""
+    return _shutdown_event.is_set()
+
+
+def request_shutdown():
+    """Request a graceful shutdown."""
+    _shutdown_event.set()
+    print("\n[!] Shutdown requested...")
+
+
+def clear_shutdown():
+    """Clear the shutdown flag."""
+    _shutdown_event.clear()
+
+
+def get_solver():
+    """Get or create solver instance (singleton per thread)."""
+    if not HAS_LOCAL_SOLVER:
+        return None
+    
     thread_id = threading.get_ident()
     
     with _solver_lock:
         if thread_id not in _solver_instances:
-            _solver_instances[thread_id] = CustomCaptchaSolver(debug=True)
+            _solver_instances[thread_id] = RealCaptchaSolver(
+                debug=_config.get("debug", False),
+                headless=_config.get("headless", True)
+            )
         return _solver_instances[thread_id]
 
-def cleanup_thread_solver():
-    """Cleanup solver for current thread."""
-    thread_id = threading.get_ident()
-    with _solver_lock:
-        if thread_id in _solver_instances:
-            _solver_instances[thread_id].close()
-            del _solver_instances[thread_id]
 
-def get_token(session, metadata=None):
+def get_token(session, metadata=None) -> Optional[str]:
     """
-    Legacy wrapper for backwards compatibility with roblox.py
-    Returns token string or None
+    Main entry point - Solve captcha and return token.
+    
+    This is called from roblox.py when captcha is detected during login.
+    
+    Args:
+        session: Session object (has proxy info)
+        metadata: Challenge metadata from Roblox (important!)
+        
+    Returns:
+        Captcha token or None if failed
     """
-    result_container = {"success": False, "token": None}
-    event = threading.Event()
-
-    def run_solver_task():
-        nonlocal result_container
-        try:
-            solver = get_solver_instance()
-            
-            # Ensure browser is running
-            if not solver.browser:
-                proxy = getattr(session, 'proxy_dict', None)
-                if not solver.start_browser(proxy):
-                    print("[-] Failed to start browser for solver")
-                    return
-
-            url = getattr(session, 'url', 'https://www.roblox.com/login')
-            blob = getattr(session, 'captcha_blob', None)
-            site_key = getattr(session, 'captcha_site_key', "476068BF-9607-4799-B53D-966BE98E2B81")
-            
-            print(f"[*] 🧠 Solving Captcha...")
-            
-            res = solver.solve_with_token(site_key, url, blob)
-            
-            if res.get('success'):
-                result_container['success'] = True
-                result_container['token'] = res.get('token')
-            else:
-                print("[-] ❌ Solver returned failure")
-                
-        except Exception as e:
-            print(f"[-] 💥 Solver Thread Crash: {e}")
-            import traceback
-            traceback.print_exc()
-        finally:
-            event.set()
-
-    t = threading.Thread(target=run_solver_task)
-    t.daemon = True
-    t.start()
+    global _stats
     
-    completed = event.wait(timeout=60)
+    if is_shutdown():
+        print("[!] Shutdown requested, skipping captcha")
+        return None
     
-    if not completed:
-        print("[-] ⏱️ Captcha Solver Timed Out (60s)")
+    if not HAS_LOCAL_SOLVER:
+        print("[-] ❌ No local solver available!")
+        print("[!] Install: pip install opencv-python numpy playwright")
+        _stats["failed"] += 1
+        return None
+    
+    username = getattr(session, 'username', 'Unknown')
+    password = getattr(session, 'password', None)
+    proxy_dict = getattr(session, 'proxy_dict', None)
+    
+    print(f"[*] 🧩 Solving captcha for {username} (FREE!)...")
+    
+    try:
+        solver = get_solver()
+        if not solver:
+            _stats["failed"] += 1
+            return None
+        
+        # Ensure browser is started
+        if not solver.browser:
+            print(f"[*] 🌐 Starting browser...")
+            if not solver.start_browser(proxy_dict):
+                print(f"[-] ❌ Failed to start browser")
+                _stats["failed"] += 1
+                return None
+        
+        # ADVANCED: Open captcha DIRECTLY - no login page needed!
+        # When API detects captcha, we go straight to FunCaptcha
+        print(f"[*] AI Mode: Opening captcha directly (no login page)...")
+
+        result = solver.solve_with_token(
+            site_key="476068BF-9607-4799-B53D-966BE98E2B81",
+            blob=metadata,  # Pass the blob from API challenge
+            timeout=180,
+            use_direct=True  # Direct captcha URL - ADVANCED!
+        )
+        
+        _stats["attempts"] += 1
+        
+        if result.get('success'):
+            token = result.get('token')
+            if token and token != "NO_CAPTCHA":
+                _stats["total_solved"] += 1
+                print(f"[+] ✅ Captcha solved! (FREE!)")
+                return token
+            elif token == "NO_CAPTCHA":
+                print(f"[!] No captcha found - account might already be verified")
+                return "SKIP"
+        
+        print(f"[-] ❌ Captcha solving failed")
+        _stats["failed"] += 1
         return None
         
-    return result_container['token'] if result_container['success'] else None
+    except Exception as e:
+        print(f"[-] 💥 Solver error: {e}")
+        _stats["failed"] += 1
+        return None
 
-def solve_captcha_wrapper(session):
-    """
-    Runs the captcha solver in a background thread to prevent freezing.
-    Returns True if solved, False otherwise.
-    """
-    result_container = {"success": False, "token": None}
-    event = threading.Event()
 
-    def run_solver_task():
-        nonlocal result_container
-        try:
-            solver = get_solver_instance()
-            
-            if not solver.browser:
-                proxy = getattr(session, 'proxy_dict', None)
-                if not solver.start_browser(proxy):
-                    print("[-] Failed to start browser for solver")
-                    return
+def get_stats() -> Dict[str, int]:
+    """Get solving statistics."""
+    return _stats.copy()
 
-            url = getattr(session, 'url', 'https://www.roblox.com/login')
-            blob = getattr(session, 'captcha_blob', None)
-            site_key = getattr(session, 'captcha_site_key', "476068BF-9607-4799-B53D-966BE98E2B81")
-            
-            username = getattr(session, 'username', 'Unknown')
-            print(f"[*] 🧠 Solving Captcha for {username}...")
-            
-            res = solver.solve_with_token(site_key, url, blob)
-            
-            if res.get('success'):
-                result_container['success'] = True
-                result_container['token'] = res.get('token')
-                
-                if hasattr(session, 'set_captcha_token'):
-                    session.set_captcha_token(result_container['token'])
-                    token_preview = result_container['token'][:20] if result_container['token'] and len(result_container['token']) > 20 else 'N/A'
-                    print(f"[+] ✅ Captcha Solved! Token: {token_preview}...")
-                else:
-                    print("[!] Session missing set_captcha_token method")
-            else:
-                print("[-] ❌ Solver returned failure")
-                
-        except Exception as e:
-            print(f"[-] 💥 Solver Thread Crash: {e}")
-        finally:
-            event.set()
-
-    t = threading.Thread(target=run_solver_task, daemon=True)
-    t.start()
-    
-    completed = event.wait(timeout=60)
-    
-    if not completed:
-        print("[-] ⏱️ Captcha Solver Timed Out (60s)")
-        return False
-        
-    return result_container['success']
 
 def cleanup_solver():
-    """Call this at the end of your program to close all browser instances."""
+    """Close all browser instances."""
     global _solver_instances
+    
+    request_shutdown()
+    
     with _solver_lock:
         for thread_id, solver in list(_solver_instances.items()):
             try:
-                print(f"[*] Closing solver browser for thread {thread_id}...")
-                solver.close()
-            except Exception as e:
-                print(f"[!] Error closing solver: {e}")
+                if hasattr(solver, 'close'):
+                    solver.close()
+            except:
+                pass
         _solver_instances.clear()
+    
+    print(f"\n[+] 📊 Captcha Stats:")
+    print(f"    ✅ Solved: {_stats['total_solved']}")
+    print(f"    ❌ Failed: {_stats['failed']}")
+    print(f"    💰 Cost:   $0.00 (FREE!)")
+
+
+def setup_keyboard_interrupt():
+    """Setup Ctrl+C to stop gracefully."""
+    
+    def signal_handler(sig, frame):
+        print("\n" + "="*50)
+        print("⌨️  KEYBOARD INTERRUPT (Ctrl+C)")
+        print("="*50)
+        print("[!] Stopping checker...")
+        
+        request_shutdown()
+        time.sleep(0.5)
+        cleanup_solver()
+        
+        print(f"\n[+] 📊 Final Stats:")
+        print(f"    ✅ Solved: {_stats['total_solved']}")
+        print(f"    ❌ Failed: {_stats['failed']}")
+        print(f"    💰 Cost:   $0.00 (FREE!)")
+        print("\n[+] 👋 Goodbye!")
+        sys.exit(0)
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    print("[*] ⌨️ Press Ctrl+C to stop anytime")
+
+
+# Auto-setup keyboard interrupt
+setup_keyboard_interrupt()
+
+
+# Backwards compatibility
+solve_captcha_wrapper = get_token
+
+
+if __name__ == "__main__":
+    print("="*60)
+    print("🧩 FREE Local Captcha Solver")
+    print("="*60)
+    print()
+    print("💰 Cost: $0.00 - Completely FREE!")
+    print("🎯 No API key needed!")
+    print()
+    print("Requirements:")
+    print("  pip install opencv-python numpy playwright")
+    print("  playwright install chromium")
+    print()
+    
+    # Test the solver
+    print("[*] Testing solver...")
+    configure(debug=True, headless=False)
+    
+    solver = get_solver()
+    if solver:
+        print("[+] ✅ Solver ready!")
+        print("[*] Run main.py to start checking accounts")
+    else:
+        print("[-] ❌ Solver not available - check dependencies")

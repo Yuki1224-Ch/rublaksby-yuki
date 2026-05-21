@@ -17,7 +17,9 @@ DEFAULT_CONFIG = {
     "rareItems": [],
     "minRobux": 0,
     "saveValidOnly": True,
-    "delay_between_checks": [1, 3]
+    "delay_between_checks": [1, 3],
+    "captcha_api_key": "",
+    "captcha_timeout": 180
 }
 
 def get_config_path():

